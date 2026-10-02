@@ -90,12 +90,16 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 				TsfNotifyLayoutChange(context->tsf);
 			}
 		}
+		else if (MPackMatchString(result.notification.name, "ndx_scroll")) {
+			// Sent by the WinScrolled autocmd, see NvimInitialize
+			RendererScrollWindows(context->renderer, mpack_node_array_at(result.params, 0));
+		}
 		else if (MPackMatchString(result.notification.name, "ndx_option")) {
-			// Sent by the g:ndx_cursor_* watcher, see NvimInitialize
+			// Sent by the g:ndx_* watcher, see NvimInitialize
 			mpack_node_t name = mpack_node_array_at(result.params, 0);
 			mpack_node_t value = mpack_node_array_at(result.params, 1);
 			if (mpack_node_type(name) == mpack_type_str) {
-				RendererSetCursorOption(context->renderer, mpack_node_str(name), mpack_node_strlen(name), value);
+				RendererSetOption(context->renderer, mpack_node_str(name), mpack_node_strlen(name), value);
 			}
 		}
 	} break;
@@ -105,7 +109,7 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 			// like additional startup settings or something else
 			NvimSendResponse(context->nvim, result.request.msg_id);
 			NvimGetOptionValue(context->nvim, "guifont");
-			NvimSendCursorOptions(context->nvim);
+			NvimSendOptions(context->nvim);
 		}
 	} break;
 	}
@@ -168,6 +172,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	case WM_NVIM_MESSAGE: {
 		mpack_tree_t *tree = reinterpret_cast<mpack_tree_t *>(wparam);
 		ProcessMPackMessage(context, tree);
+
+		// This message is sent from the nvim thread and handled within GetMessage, which keeps
+		// waiting afterwards. Wake up the message loop in case an animation or blinking started.
+		if (context->renderer->animation_active) {
+			PostMessage(hwnd, WM_RENDERER_ANIMATE, 0, 0);
+		}
+	} return 0;
+	case WM_RENDERER_ANIMATE: {
 	} return 0;
 	case WM_RENDERER_FONT_UPDATE: {
 		auto [rows, cols] = RendererPixelsToGridSize(context->renderer,
@@ -635,12 +647,26 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 	uint32_t previous_width = 0, previous_height = 0;
 	while (true) {
 		if (RendererIsAnimating(&renderer) && !renderer.draw_active) {
-			// Draw the next animation frame as soon as the swapchain is ready for it,
-			// which paces the animation to the display, but handle messages meanwhile
-			DWORD wait_result = MsgWaitForMultipleObjectsEx(1, &renderer.swapchain_wait_handle,
+			// Draw the next animation frame once the display is ready for it, but handle messages meanwhile
+			HANDLE animation_timer = RendererScheduleAnimationFrame(&renderer);
+			DWORD wait_result = MsgWaitForMultipleObjectsEx(1, &animation_timer,
 				INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
 			if (wait_result == WAIT_OBJECT_0) {
 				RendererAnimate(&renderer);
+				continue;
+			}
+			if (!PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
+				continue;
+			}
+			if (msg.message == WM_QUIT) {
+				break;
+			}
+		}
+		else if (DWORD blink_timeout = renderer.draw_active ? INFINITE : RendererGetBlinkTimeout(&renderer);
+			blink_timeout != INFINITE) {
+			// Wake up to show or hide the blinking cursor
+			if (MsgWaitForMultipleObjectsEx(0, nullptr, blink_timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_TIMEOUT) {
+				RendererFlush(&renderer);
 				continue;
 			}
 			if (!PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {

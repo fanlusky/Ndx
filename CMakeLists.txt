@@ -16,6 +16,7 @@ set(Ndx_HEADERS
     "src/renderer/cursor_animation.h"
     "src/renderer/glyph_renderer.h"
     "src/renderer/renderer.h"
+    "src/renderer/scroll_animation.h"
     "src/tsf/tsf.h"
     "src/third_party/mpack/mpack.h"
 )
@@ -26,6 +27,7 @@ set(Ndx_SOURCES
     "src/renderer/cursor_animation.cpp"
     "src/renderer/glyph_renderer.cpp"
     "src/renderer/renderer.cpp"
+    "src/renderer/scroll_animation.cpp"
     "src/tsf/tsf.cpp"
     "src/third_party/mpack/mpack.c"
 )
