@@ -212,6 +212,7 @@ void RendererShutdown(Renderer *renderer) {
 	free(renderer->grid_chars);
 	free(renderer->wchar_buffer);
 	free(renderer->grid_cell_properties);
+	free(renderer->composition_text);
 }
 
 void RendererResize(Renderer *renderer, uint32_t width, uint32_t height) {
@@ -827,25 +828,234 @@ void UpdateCursorPos(Renderer *renderer, mpack_node_t cursor_goto) {
 	renderer->cursor.col = MPackIntFromArray(cursor_goto_params, 2);
 }
 
-void UpdateImePos(Renderer* renderer) {
-	HIMC input_context = ImmGetContext(renderer->hwnd);
-	COMPOSITIONFORM composition_form {
-		.dwStyle = CFS_POINT,
-		.ptCurrentPos = {
-			.x = static_cast<LONG>(renderer->cursor.col * renderer->font_width),
-			.y = static_cast<LONG>(renderer->cursor.row * renderer->font_height)
-		}
-	};
+int CompositionRow(Renderer *renderer) {
+	return max(0, min(renderer->cursor.row, renderer->grid_rows - 1));
+}
 
-	if (ImmSetCompositionWindow(input_context, &composition_form)) {
-		LOGFONTW font_attribs {
-			.lfHeight = static_cast<LONG>(renderer->font_height)
-		};
-		wcscpy_s(font_attribs.lfFaceName, LF_FACESIZE, renderer->font);
-		ImmSetCompositionFontW(input_context, &font_attribs);
+// Lays out the composition string at the cursor, shifting it to the left if it would
+// otherwise overflow the grid
+IDWriteTextLayout *CreateCompositionLayout(Renderer *renderer, const wchar_t *text, uint32_t length, float *origin_x) {
+	float grid_width = renderer->grid_cols * renderer->font_width;
+
+	IDWriteTextLayout *text_layout = nullptr;
+	if (FAILED(renderer->dwrite_factory->CreateTextLayout(text, length, renderer->dwrite_text_format,
+		max(grid_width, 1.0f), renderer->font_height, &text_layout))) {
+		return nullptr;
 	}
 
-	ImmReleaseContext(renderer->hwnd, input_context);
+	DWRITE_TEXT_METRICS metrics;
+	WIN_CHECK(text_layout->GetMetrics(&metrics));
+	float text_width = metrics.widthIncludingTrailingWhitespace;
+
+	*origin_x = renderer->cursor.col * renderer->font_width;
+	if (*origin_x + text_width > grid_width) {
+		*origin_x = max(0.0f, grid_width - text_width);
+	}
+	return text_layout;
+}
+
+float CompositionPositionToX(IDWriteTextLayout *text_layout, uint32_t length, uint32_t position) {
+	DWRITE_HIT_TEST_METRICS metrics;
+	float x, y;
+	if (position == 0) {
+		WIN_CHECK(text_layout->HitTestTextPosition(0, false, &x, &y, &metrics));
+	}
+	else {
+		WIN_CHECK(text_layout->HitTestTextPosition(min(position, length) - 1, true, &x, &y, &metrics));
+	}
+	return x;
+}
+
+RECT RendererGetCompositionTextRect(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t start, uint32_t end) {
+	float top = CompositionRow(renderer) * renderer->font_height;
+	float left = renderer->cursor.col * renderer->font_width;
+	float right = left + renderer->font_width;
+
+	float origin_x;
+	IDWriteTextLayout *text_layout;
+	if (length > 0 && renderer->grid_initialized &&
+		(text_layout = CreateCompositionLayout(renderer, text, length, &origin_x))) {
+		left = origin_x + CompositionPositionToX(text_layout, length, start);
+		right = origin_x + CompositionPositionToX(text_layout, length, end);
+		right = max(right, left + 1.0f);
+		text_layout->Release();
+	}
+
+	return RECT {
+		.left = static_cast<LONG>(floorf(left)),
+		.top = static_cast<LONG>(floorf(top)),
+		.right = static_cast<LONG>(ceilf(right)),
+		.bottom = static_cast<LONG>(ceilf(top + renderer->font_height))
+	};
+}
+
+// Restores the grid line covered by the previously drawn composition string
+void ClearComposition(Renderer *renderer) {
+	if (!renderer->composition_drawn) return;
+
+	renderer->composition_drawn = false;
+	if (renderer->composition_drawn_row < renderer->grid_rows) {
+		DrawGridLine(renderer, renderer->composition_drawn_row);
+	}
+}
+
+void DrawComposition(Renderer *renderer) {
+	if (renderer->composition_length == 0 || !renderer->grid_initialized) return;
+
+	float origin_x;
+	IDWriteTextLayout *text_layout = CreateCompositionLayout(renderer,
+		renderer->composition_text, renderer->composition_length, &origin_x);
+	if (!text_layout) return;
+
+	int row = CompositionRow(renderer);
+	DWRITE_TEXT_METRICS metrics;
+	WIN_CHECK(text_layout->GetMetrics(&metrics));
+	D2D1_RECT_F rect {
+		.left = origin_x,
+		.top = row * renderer->font_height,
+		.right = origin_x + metrics.widthIncludingTrailingWhitespace,
+		.bottom = (row * renderer->font_height) + renderer->font_height
+	};
+	D2D1_RECT_F clip_rect = rect;
+	clip_rect.right = max(rect.right, renderer->grid_cols * renderer->font_width);
+
+	HighlightAttributes *hl_attribs = &renderer->hl_attribs[0];
+	uint32_t foreground = CreateForegroundColor(renderer, hl_attribs);
+	uint32_t special = CreateSpecialColor(renderer, hl_attribs);
+	DrawBackgroundRect(renderer, rect, hl_attribs);
+	ApplyHighlightAttributes(renderer, hl_attribs, text_layout, 0, renderer->composition_length);
+
+	// Without display attributes from the IME, underline the whole composition
+	CompositionClause whole_text {
+		.start = 0,
+		.end = renderer->composition_length,
+		.line_style = CompositionLineStyle::Solid
+	};
+	const CompositionClause *clauses = renderer->composition_clause_count ? renderer->composition_clauses : &whole_text;
+	uint32_t clause_count = renderer->composition_clause_count ? renderer->composition_clause_count : 1;
+
+	renderer->d2d_context->PushAxisAlignedClip(clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
+
+	// Clause backgrounds and text colors as declared by the IME
+	for (uint32_t i = 0; i < clause_count; ++i) {
+		uint32_t start = min(clauses[i].start, renderer->composition_length);
+		uint32_t end = min(clauses[i].end, renderer->composition_length);
+		if (start >= end) continue;
+
+		if (clauses[i].has_background_color) {
+			D2D1_RECT_F background_rect {
+				.left = origin_x + CompositionPositionToX(text_layout, renderer->composition_length, start),
+				.top = rect.top,
+				.right = origin_x + CompositionPositionToX(text_layout, renderer->composition_length, end),
+				.bottom = rect.bottom
+			};
+			renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(clauses[i].background_color));
+			renderer->d2d_context->FillRectangle(background_rect, renderer->d2d_background_rect_brush);
+		}
+		if (clauses[i].has_text_color) {
+			GlyphDrawingEffect *drawing_effect = new GlyphDrawingEffect(clauses[i].text_color, special);
+			text_layout->SetDrawingEffect(drawing_effect, DWRITE_TEXT_RANGE { .startPosition = start, .length = end - start });
+		}
+	}
+
+	text_layout->Draw(renderer, renderer->glyph_renderer, origin_x, rect.top);
+
+	float thin_line = max(1.0f, roundf(renderer->dpi_scale));
+	for (uint32_t i = 0; i < clause_count; ++i) {
+		uint32_t start = min(clauses[i].start, renderer->composition_length);
+		uint32_t end = min(clauses[i].end, renderer->composition_length);
+		if (start >= end || clauses[i].line_style == CompositionLineStyle::None) continue;
+
+		// Leave a small gap between clauses so they can be told apart
+		float left = origin_x + CompositionPositionToX(text_layout, renderer->composition_length, start) + thin_line;
+		float right = origin_x + CompositionPositionToX(text_layout, renderer->composition_length, end) - thin_line;
+		float thickness = clauses[i].bold_line ? thin_line * 2.0f : thin_line;
+		float bottom = rect.bottom;
+		uint32_t line_color = clauses[i].has_line_color ? clauses[i].line_color :
+			(clauses[i].has_text_color ? clauses[i].text_color : foreground);
+		renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(line_color));
+
+		const auto FillSegment = [&](float x0, float x1, float y0, float y1) {
+			D2D1_RECT_F segment { .left = x0, .top = y0, .right = min(x1, right), .bottom = y1 };
+			if (segment.right > segment.left) {
+				renderer->d2d_context->FillRectangle(segment, renderer->d2d_background_rect_brush);
+			}
+		};
+
+		switch (clauses[i].line_style) {
+		case CompositionLineStyle::Solid: {
+			FillSegment(left, right, bottom - thickness, bottom);
+		} break;
+		case CompositionLineStyle::Dot: {
+			for (float x = left; x < right; x += thickness * 2.0f) {
+				FillSegment(x, x + thickness, bottom - thickness, bottom);
+			}
+		} break;
+		case CompositionLineStyle::Dash: {
+			for (float x = left; x < right; x += thickness * 5.0f) {
+				FillSegment(x, x + thickness * 3.0f, bottom - thickness, bottom);
+			}
+		} break;
+		case CompositionLineStyle::Squiggle: {
+			// Alternate between a low and a high step to form a wave
+			float step = thickness * 2.0f;
+			bool high = false;
+			for (float x = left; x < right; x += step, high = !high) {
+				float offset = high ? thickness : 0.0f;
+				FillSegment(x, x + step, bottom - thickness - offset, bottom - offset);
+			}
+		} break;
+		case CompositionLineStyle::None: {
+		} break;
+		}
+	}
+
+	renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(foreground));
+	float caret_x = origin_x + CompositionPositionToX(text_layout, renderer->composition_length, renderer->composition_caret);
+	D2D1_RECT_F caret_rect {
+		.left = caret_x,
+		.top = rect.top,
+		.right = caret_x + thin_line,
+		.bottom = rect.bottom
+	};
+	renderer->d2d_context->FillRectangle(caret_rect, renderer->d2d_background_rect_brush);
+
+	renderer->d2d_context->PopAxisAlignedClip();
+	text_layout->Release();
+
+	renderer->composition_drawn = true;
+	renderer->composition_drawn_row = row;
+}
+
+void RendererSetComposition(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t caret,
+	const CompositionClause *clauses, uint32_t clause_count) {
+	if (length > renderer->composition_capacity) {
+		wchar_t *new_text = static_cast<wchar_t *>(realloc(renderer->composition_text, length * sizeof(wchar_t)));
+		if (!new_text) {
+			length = 0;
+		}
+		else {
+			renderer->composition_text = new_text;
+			renderer->composition_capacity = length;
+		}
+	}
+
+	if (length > 0) {
+		memcpy(renderer->composition_text, text, length * sizeof(wchar_t));
+	}
+	renderer->composition_length = length;
+	renderer->composition_caret = min(caret, length);
+
+	renderer->composition_clause_count = min(clause_count, static_cast<uint32_t>(MAX_COMPOSITION_CLAUSES));
+	if (renderer->composition_clause_count > 0) {
+		memcpy(renderer->composition_clauses, clauses, renderer->composition_clause_count * sizeof(CompositionClause));
+	}
+
+	// Redraw right away unless nvim is in the middle of a redraw,
+	// in which case the composition gets drawn on the next flush
+	if (renderer->grid_initialized && renderer->dxgi_swapchain && !renderer->draw_active) {
+		RendererFlush(renderer);
+	}
 }
 
 void UpdateWindowTitle(Renderer *renderer, mpack_node_t set_title) {
@@ -1117,9 +1327,11 @@ void RendererFlush(Renderer* renderer) {
 		DrawAllGridLines(renderer);
 	}
 
+	ClearComposition(renderer);
 	if (!renderer->ui_busy) {
 		DrawCursor(renderer);
 	}
+	DrawComposition(renderer);
 	DrawBorderRectangles(renderer);
 	FinishDraw(renderer);
 }
@@ -1162,7 +1374,6 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 				DrawGridLine(renderer, renderer->cursor.row);
 			}
 			UpdateCursorPos(renderer, redraw_command_arr);
-			UpdateImePos(renderer);
 		}
 		else if (MPackMatchString(redraw_command_name, "mode_info_set")) {
 			UpdateCursorModeInfos(renderer, redraw_command_arr);

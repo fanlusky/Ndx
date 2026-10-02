@@ -291,6 +291,44 @@ void NvimSendInput(Nvim *nvim, const char *input_chars) {
 	MPackSendData(nvim->stdin_write, data, size);
 }
 
+void NvimSendString(Nvim *nvim, const wchar_t *text, size_t length) {
+	// Send in chunks so a message always fits in MAX_MPACK_OUTBOUND_MESSAGE_SIZE
+	constexpr size_t MAX_CHUNK_LENGTH = 256;
+	// Each wchar takes at most 3 bytes as utf8, "<" takes 4 bytes once escaped
+	char utf8_encoded[MAX_CHUNK_LENGTH * 3];
+	char input_chars[MAX_CHUNK_LENGTH * 4 + 1];
+
+	size_t offset = 0;
+	while (offset < length) {
+		size_t chunk_length = min(MAX_CHUNK_LENGTH, length - offset);
+		// Don't split a surrogate pair between chunks
+		if (offset + chunk_length < length && IS_HIGH_SURROGATE(text[offset + chunk_length - 1])) {
+			--chunk_length;
+		}
+
+		int utf8_length = WideCharToMultiByte(CP_UTF8, 0, &text[offset], static_cast<int>(chunk_length),
+			utf8_encoded, sizeof(utf8_encoded), NULL, NULL);
+		offset += chunk_length;
+
+		size_t input_length = 0;
+		for (int i = 0; i < utf8_length; ++i) {
+			// Special case for <LT>
+			if (utf8_encoded[i] == '<') {
+				memcpy(&input_chars[input_length], "<LT>", 4);
+				input_length += 4;
+			}
+			else {
+				input_chars[input_length++] = utf8_encoded[i];
+			}
+		}
+		input_chars[input_length] = '\0';
+
+		if (input_length > 0) {
+			NvimSendInput(nvim, input_chars);
+		}
+	}
+}
+
 void NvimSendMouseInput(Nvim *nvim, MouseButton button, MouseAction action, int mouse_row, int mouse_col) {
 	char data[MAX_MPACK_OUTBOUND_MESSAGE_SIZE];
 	mpack_writer_t writer;

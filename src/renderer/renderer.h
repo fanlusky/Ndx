@@ -54,9 +54,32 @@ struct CellProperty {
 	bool is_wide_char;
 };
 
+enum class CompositionLineStyle : uint8_t {
+	None,
+	Solid,
+	Dot,
+	Dash,
+	Squiggle
+};
+// A range of the IME composition string, styled as declared by the
+// IME's display attribute. Colors are 0xRRGGBB.
+struct CompositionClause {
+	uint32_t start;
+	uint32_t end;
+	CompositionLineStyle line_style;
+	bool bold_line;
+	bool has_text_color;
+	bool has_background_color;
+	bool has_line_color;
+	uint32_t text_color;
+	uint32_t background_color;
+	uint32_t line_color;
+};
+
 constexpr int MAX_HIGHLIGHT_ATTRIBS = 0xFFFF;
 constexpr int MAX_CURSOR_MODE_INFOS = 64;
 constexpr int MAX_FONT_LENGTH = 128;
+constexpr int MAX_COMPOSITION_CLAUSES = 64;
 constexpr float DEFAULT_DPI = 96.0f;
 constexpr float POINTS_PER_INCH = 72.0f;
 struct GlyphDrawingEffect;
@@ -110,6 +133,15 @@ struct Renderer {
 	size_t wchar_buffer_length;
 	CellProperty *grid_cell_properties;
 
+	wchar_t *composition_text;
+	uint32_t composition_length;
+	uint32_t composition_capacity;
+	uint32_t composition_caret;
+	CompositionClause composition_clauses[MAX_COMPOSITION_CLAUSES];
+	uint32_t composition_clause_count;
+	bool composition_drawn;
+	int composition_drawn_row;
+
 	HWND hwnd;
 	bool draw_active;
 	bool ui_busy;
@@ -126,6 +158,12 @@ bool RendererUpdateGuiFont(Renderer *renderer, const char *guifont, size_t strle
 bool RendererUpdateFont(Renderer *renderer, float font_size, const char *font_string = "", int strlen = 0);
 void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximized);
 void RendererFlush(Renderer* renderer);
+
+// Draws the IME composition string inline at the cursor, pass length 0 to clear it
+void RendererSetComposition(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t caret,
+	const CompositionClause *clauses, uint32_t clause_count);
+// Client rect of [start, end) of a composition string as it would be drawn at the cursor
+RECT RendererGetCompositionTextRect(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t start, uint32_t end);
 
 PixelSize RendererGridToPixelSize(Renderer *renderer, int rows, int cols);
 GridSize RendererPixelsToGridSize(Renderer *renderer, int width, int height);

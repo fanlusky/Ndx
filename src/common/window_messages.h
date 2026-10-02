@@ -5,3 +5,6 @@
 
 // WPARAM: none, LPARAM: none
 #define WM_RENDERER_FONT_UPDATE (WM_USER + 1)
+
+// WPARAM: none, LPARAM: none
+#define WM_TSF_PROCESS_PENDING (WM_USER + 2)

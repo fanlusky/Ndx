@@ -1,5 +1,6 @@
 #include "nvim/nvim.h"
 #include "renderer/renderer.h"
+#include "tsf/tsf.h"
 
 struct Context {
 	bool start_maximized;
@@ -10,6 +11,7 @@ struct Context {
 	HWND hwnd;
 	Nvim *nvim;
 	Renderer *renderer;
+	Tsf *tsf;
 	bool dead_char_pending;
 	bool xbuttons[2];
 	float buffered_scroll_amount;
@@ -77,7 +79,18 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 	} break;
 	case MPackMessageType::Notification: {
 		if (MPackMatchString(result.notification.name, "redraw")) {
+			Cursor previous_cursor = context->renderer->cursor;
+			float previous_font_width = context->renderer->font_width;
+			float previous_font_height = context->renderer->font_height;
 			RendererRedraw(context->renderer, result.params, context->start_maximized);
+
+			// Let the IME reposition its candidate window
+			if (previous_cursor.row != context->renderer->cursor.row ||
+				previous_cursor.col != context->renderer->cursor.col ||
+				previous_font_width != context->renderer->font_width ||
+				previous_font_height != context->renderer->font_height) {
+				TsfNotifyLayoutChange(context->tsf);
+			}
 		}
 	} break;
 	case MPackMessageType::Request: {
@@ -116,7 +129,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 			uint32_t new_height = HIWORD(lparam);
 			context->saved_window_height = new_height;
 			context->saved_window_width = new_width;
+			TsfNotifyLayoutChange(context->tsf);
 		}
+	} return 0;
+	case WM_MOVE: {
+		TsfNotifyLayoutChange(context->tsf);
 	} return 0;
 	case WM_DPICHANGED: {
 		UINT current_dpi = HIWORD(wparam);
@@ -136,6 +153,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 		RendererResize(context->renderer, context->saved_window_width, context->saved_window_height);
 		auto [rows, cols] = RendererPixelsToGridSize(context->renderer, context->saved_window_width, context->saved_window_height);
 		SendResizeIfNecessary(context, rows, cols);
+		TsfNotifyLayoutChange(context->tsf);
 	} return 0;
 	case WM_DESTROY: {
 		PostQuitMessage(0);
@@ -148,6 +166,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 		auto [rows, cols] = RendererPixelsToGridSize(context->renderer,
 			context->renderer->pixel_size.width, context->renderer->pixel_size.height);
 		SendResizeIfNecessary(context, rows, cols);
+		TsfNotifyLayoutChange(context->tsf);
+	} return 0;
+	case WM_TSF_PROCESS_PENDING: {
+		TsfProcessPending(context->tsf);
 	} return 0;
 	case WM_INPUTLANGCHANGE: {
 		HKL hkl = (HKL)lparam;
@@ -182,6 +204,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	} return 0;
 	case WM_KEYDOWN:
 	case WM_SYSKEYDOWN: {
+		// The key has already been handled by the IME through TSF
+		if (wparam == VK_PROCESSKEY) {
+			return 0;
+		}
+
 		// Special case for <ALT+ENTER> (fullscreen transition)
 		if (!context->disable_fullscreen && ((GetKeyState(VK_LMENU) & 0x80) != 0) && wparam == VK_RETURN) {
 			ToggleFullscreen(hwnd, context);
@@ -259,6 +286,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	case WM_LBUTTONUP:
 	case WM_RBUTTONUP:
 	case WM_MBUTTONUP: {
+		// Commit any pending composition before nvim moves the cursor
+		if (msg == WM_LBUTTONDOWN || msg == WM_MBUTTONDOWN || msg == WM_RBUTTONDOWN) {
+			TsfTerminateComposition(context->tsf);
+		}
+
 		POINTS cursor_pos = MAKEPOINTS(lparam);
 		auto [row, col] = RendererCursorToGridPoint(context->renderer, cursor_pos.x, cursor_pos.y);
 		if (msg == WM_LBUTTONDOWN) {
@@ -506,8 +538,12 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 		return 1;
 	}
 
+	// TSF requires a single threaded apartment
+	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
 	Nvim nvim {};
 	Renderer renderer {};
+	Tsf tsf {};
 	constexpr uint32_t cursor_timer_id = 1;
 	Context context {
 		.start_maximized = start_maximized,
@@ -517,6 +553,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
         .disable_fullscreen = disable_fullscreen,
 		.nvim = &nvim,
 		.renderer = &renderer,
+		.tsf = &tsf,
 		.saved_window_placement = WINDOWPLACEMENT { .length = sizeof(WINDOWPLACEMENT) },
 		.enable_cursor_timeout = enable_cursor_timeout,
 		.cursor_timer_id = cursor_timer_id,
@@ -551,6 +588,8 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 
 	NvimInitialize(&nvim, nvim_cmd, hwnd);
 	free(nvim_cmd);
+
+	TsfInitialize(&tsf, hwnd, &renderer, &nvim);
 
 	// Forceably update the window to prevent any frames where the window is blank. Windows API docs
 	// specify that SetWindowPos should be called with these arguments after SetWindowLong is called.
@@ -588,6 +627,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 		}
 	}
 
+	TsfShutdown(&tsf);
 	RendererShutdown(&renderer);
 	NvimShutdown(&nvim);
 
@@ -621,6 +661,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 
 	UnregisterClass(window_class_name, instance);
 	DestroyWindow(hwnd);
+	CoUninitialize();
 
 	return nvim.exit_code;
 }

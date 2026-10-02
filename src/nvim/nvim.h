@@ -65,6 +65,7 @@ void NvimSendResize(Nvim *nvim, int grid_rows, int grid_cols);
 void NvimSendChar(Nvim *nvim, wchar_t input_char);
 void NvimSendSysChar(Nvim *nvim, wchar_t sys_char);
 void NvimSendInput(Nvim *nvim, const char* input_chars);
+void NvimSendString(Nvim *nvim, const wchar_t *text, size_t length);
 void NvimSendMouseInput(Nvim *nvim, MouseButton button, MouseAction action, int mouse_row, int mouse_col);
 void NvimSendResponse(Nvim *nvim, int64_t req_id);
 bool NvimProcessKeyDown(Nvim *nvim, int virtual_key);

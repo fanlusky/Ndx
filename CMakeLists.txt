@@ -15,6 +15,7 @@ set(Nvy_HEADERS
     "src/nvim/nvim.h"
     "src/renderer/glyph_renderer.h"
     "src/renderer/renderer.h"
+    "src/tsf/tsf.h"
     "src/third_party/mpack/mpack.h"
 )
 
@@ -23,6 +24,7 @@ set(Nvy_SOURCES
     "src/nvim/nvim.cpp"
     "src/renderer/glyph_renderer.cpp"
     "src/renderer/renderer.cpp"
+    "src/tsf/tsf.cpp"
     "src/third_party/mpack/mpack.c"
 )
 
@@ -42,7 +44,9 @@ target_link_libraries(Nvy PUBLIC
     dwrite.lib
     Shcore.lib
     Dwmapi.lib
-    imm32.lib
+    ole32.lib
+    oleaut32.lib
+    uuid.lib
 )
 
 target_precompile_headers(Nvy PUBLIC
@@ -58,7 +62,7 @@ target_precompile_headers(Nvy PUBLIC
     <dwrite_3.h>
     <shellscalingapi.h>
     <dwmapi.h>
-    <imm.h>
+    <msctf.h>
     
     "src/third_party/mpack/mpack.h"
 
