@@ -170,6 +170,40 @@ void HandleDeviceLost(Renderer *renderer) {
 	);
 }
 
+bool IsCjkLanguage(LANGID language) {
+	WORD primary_language = PRIMARYLANGID(language);
+	return primary_language == LANG_CHINESE || primary_language == LANG_JAPANESE || primary_language == LANG_KOREAN;
+}
+
+// Han characters are shared between Chinese, Japanese and Korean, the locale decides
+// which fonts the system fallback picks for them and which glyph forms are used.
+// Use the user locale if it is a CJK one, otherwise the language of a CJK input
+// method the user has installed (e.g. an English locale with a Chinese IME).
+void InitializeLocale(Renderer *renderer) {
+	LANGID language = LANGIDFROMLCID(GetUserDefaultLCID());
+	if (!IsCjkLanguage(language)) {
+		LANGID active_language = LOWORD(reinterpret_cast<uintptr_t>(GetKeyboardLayout(0)));
+		if (IsCjkLanguage(active_language)) {
+			language = active_language;
+		}
+		else {
+			HKL layouts[64];
+			int layout_count = GetKeyboardLayoutList(ARRAYSIZE(layouts), layouts);
+			for (int i = 0; i < layout_count; ++i) {
+				LANGID layout_language = LOWORD(reinterpret_cast<uintptr_t>(layouts[i]));
+				if (IsCjkLanguage(layout_language)) {
+					language = layout_language;
+					break;
+				}
+			}
+		}
+	}
+
+	if (!LCIDToLocaleName(MAKELCID(language, SORT_DEFAULT), renderer->locale_name, LOCALE_NAME_MAX_LENGTH, 0)) {
+		wcscpy_s(renderer->locale_name, LOCALE_NAME_MAX_LENGTH, L"en-us");
+	}
+}
+
 void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, float linespace_factor, float monitor_dpi) {
 	renderer->hwnd = hwnd;
 	renderer->disable_ligatures = disable_ligatures;
@@ -179,6 +213,8 @@ void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, f
 	renderer->hl_attribs.resize(MAX_HIGHLIGHT_ATTRIBS);
 
 	wcscpy_s(renderer->fallback_font, MAX_FONT_LENGTH, L"Consolas");
+
+	InitializeLocale(renderer);
 
 	InitializeD2D(renderer);
 	InitializeD3D(renderer);
@@ -357,7 +393,7 @@ bool UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
 		DWRITE_FONT_STYLE_NORMAL,
 		DWRITE_FONT_STRETCH_NORMAL,
 		renderer->font_size,
-		L"en-us",
+		renderer->locale_name,
 		&renderer->dwrite_text_format
 	));
 

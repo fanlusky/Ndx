@@ -116,6 +116,7 @@ struct Renderer {
     float last_requested_font_size;
 	wchar_t font[MAX_FONT_LENGTH];
 	wchar_t fallback_font[MAX_FONT_LENGTH];
+	wchar_t locale_name[LOCALE_NAME_MAX_LENGTH];
 	// The other fonts listed in guifont, used for glyphs missing from the main font
 	wchar_t guifont_fallbacks[MAX_GUIFONT_FONTS][MAX_FONT_LENGTH];
 	int guifont_fallback_count;
