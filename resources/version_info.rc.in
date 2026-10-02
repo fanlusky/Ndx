@@ -26,13 +26,13 @@ BEGIN
     BLOCK "040904E4"
     BEGIN
       VALUE "CompanyName",      "Rasmus Ishøy Michelsen and collaborators\0"
-      VALUE "FileDescription",  "Nvy.exe\0"
+      VALUE "FileDescription",  "Ndx.exe\0"
       VALUE "FileVersion",      VER_FILE_VERSION_STR
-      VALUE "InternalName",     "Nvy\0"
+      VALUE "InternalName",     "Ndx\0"
       VALUE "LegalCopyright",   "MIT License © 2020 Rasmus Ishøy Michelsen\0"
-      VALUE "LegalTrademarks",  "https://github.com/RMichelsen/Nvy/\0"
-      VALUE "OriginalFilename", "Nvy.exe\0"
-      VALUE "ProductName",      "Nvy - A Neovim client in C++\0"
+      VALUE "LegalTrademarks",  "https://github.com/fanlusky/Ndx/\0"
+      VALUE "OriginalFilename", "Ndx.exe\0"
+      VALUE "ProductName",      "Ndx - A Neovim client in C++ (fork of Nvy)\0"
       VALUE "ProductVersion",   VER_PRODUCT_VERSION_STR
     END
   END

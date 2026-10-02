@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Builds Nvy with CMake + Ninja using the MSVC x64 toolchain.
+    Builds Ndx with CMake + Ninja using the MSVC x64 toolchain.
 
 .EXAMPLE
-    .\scripts\build.ps1                    # Release build -> build\release\Nvy.exe
-    .\scripts\build.ps1 -Config Debug      # Debug build   -> build\debug\Nvy.exe
+    .\scripts\build.ps1                    # Release build -> build\release\Ndx.exe
+    .\scripts\build.ps1 -Config Debug      # Debug build   -> build\debug\Ndx.exe
     .\scripts\build.ps1 -Clean -Run        # Rebuild from scratch, then launch
 #>
 param(
@@ -12,7 +12,7 @@ param(
     [string]$Config = 'Release',
     # Delete the build directory before configuring
     [switch]$Clean,
-    # Launch Nvy.exe after a successful build
+    # Launch Ndx.exe after a successful build
     [switch]$Run
 )
 
@@ -62,7 +62,7 @@ if (Test-Path $compileCommands) {
     Copy-Item $compileCommands (Join-Path $root 'compile_commands.json') -Force
 }
 
-$exe = Join-Path $buildDir 'Nvy.exe'
+$exe = Join-Path $buildDir 'Ndx.exe'
 Write-Host "Done: $exe" -ForegroundColor Green
 
 if ($Run) {

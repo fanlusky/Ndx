@@ -155,6 +155,7 @@ void HandleDeviceLost(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
+	SafeRelease(&renderer->dwrite_font_fallback);
 	delete renderer->glyph_renderer;
 
 	InitializeD2D(renderer);
@@ -207,6 +208,7 @@ void RendererShutdown(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
+	SafeRelease(&renderer->dwrite_font_fallback);
 	delete renderer->glyph_renderer;
 
 	free(renderer->grid_chars);
@@ -362,6 +364,15 @@ bool UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
 	WIN_CHECK(renderer->dwrite_text_format->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, renderer->font_height, renderer->font_ascent * renderer->linespace_factor));
 	WIN_CHECK(renderer->dwrite_text_format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR));
 	WIN_CHECK(renderer->dwrite_text_format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP));
+
+	// Glyphs missing from the main font are looked up in the other guifont fonts
+	if (renderer->dwrite_font_fallback) {
+		IDWriteTextFormat1 *text_format;
+		if (SUCCEEDED(renderer->dwrite_text_format->QueryInterface<IDWriteTextFormat1>(&text_format))) {
+			text_format->SetFontFallback(renderer->dwrite_font_fallback);
+			text_format->Release();
+		}
+	}
 
 	SafeRelease(&font_face);
 	SafeRelease(&font_face_bold);
@@ -1065,8 +1076,8 @@ void UpdateWindowTitle(Renderer *renderer, mpack_node_t set_title) {
 	const char *new_title = mpack_node_str(value);
 	int len = mpack_node_strlen(value);
 
-	// Append " - Nvy" to the title. If title is empty, do not add " - ".
-	const char *append = len == 0 ? "Nvy" : " - Nvy";
+	// Append " - Ndx" to the title. If title is empty, do not add " - ".
+	const char *append = len == 0 ? "Ndx" : " - Ndx";
 	size_t add_len = strlen(append);
 	size_t bytes = len + add_len; // No need for '\0'
 	char *buf = static_cast<char *>(malloc(bytes));
@@ -1209,44 +1220,152 @@ void DrawBorderRectangles(Renderer *renderer) {
 	}
 }
 
+bool FontFamilyExists(Renderer *renderer, const wchar_t *family_name) {
+	IDWriteFontCollection *font_collection;
+	WIN_CHECK(renderer->dwrite_factory->GetSystemFontCollection(&font_collection));
+	uint32_t index;
+	BOOL exists = false;
+	font_collection->FindFamilyName(family_name, &index, &exists);
+	font_collection->Release();
+	return exists;
+}
+
+// Options of a guifont entry, e.g. "h12" in "Consolas:h12", see :help guifont
+bool IsGuiFontOption(const char *option, size_t length) {
+	if (length == 0) return true;
+	switch (option[0]) {
+	case 'h':
+	case 'w': return length > 1 && (isdigit(static_cast<unsigned char>(option[1])) || option[1] == '.');
+	case 'b':
+	case 'i':
+	case 'u':
+	case 's': return length == 1;
+	case 'c':
+	case 'q': return length > 1 && isupper(static_cast<unsigned char>(option[1]));
+	}
+	return false;
+}
+
+void AddGuiFontName(wchar_t (*fonts)[MAX_FONT_LENGTH], int *font_count, const char *name, size_t length) {
+	while (length > 0 && name[0] == ' ') { ++name; --length; }
+	while (length > 0 && name[length - 1] == ' ') { --length; }
+	if (length == 0 || *font_count >= MAX_GUIFONT_FONTS) return;
+
+	int wstrlen = MultiByteToWideChar(CP_UTF8, 0, name, static_cast<int>(length), fonts[*font_count], MAX_FONT_LENGTH - 1);
+	if (wstrlen > 0) {
+		fonts[*font_count][wstrlen] = L'\0';
+		++(*font_count);
+	}
+}
+
+void UpdateFontFallback(Renderer *renderer) {
+	SafeRelease(&renderer->dwrite_font_fallback);
+	if (renderer->guifont_fallback_count == 0) return;
+
+	IDWriteFontFallbackBuilder *builder;
+	if (FAILED(renderer->dwrite_factory->CreateFontFallbackBuilder(&builder))) return;
+
+	const wchar_t *family_names[MAX_GUIFONT_FONTS];
+	for (int i = 0; i < renderer->guifont_fallback_count; ++i) {
+		family_names[i] = renderer->guifont_fallbacks[i];
+	}
+
+	// Try the guifont fonts in order first, then the regular system fallback
+	DWRITE_UNICODE_RANGE all_characters { .first = 0, .last = 0x10FFFF };
+	builder->AddMapping(&all_characters, 1, family_names, renderer->guifont_fallback_count);
+	IDWriteFontFallback *system_fallback;
+	if (SUCCEEDED(renderer->dwrite_factory->GetSystemFontFallback(&system_fallback))) {
+		builder->AddMappings(system_fallback);
+		system_fallback->Release();
+	}
+	builder->CreateFontFallback(&renderer->dwrite_font_fallback);
+	builder->Release();
+}
+
+// Parses a guifont value, a comma separated list of fonts with options, e.g.
+// "CaskaydiaCove Nerd Font,Source Han Sans SC:h12". The first existing font is used
+// as the main font, the others for glyphs it doesn't have. The legacy Nvy syntax
+// "Fira Code:h24:Consolas" is still supported, Consolas being treated as another font.
 bool RendererUpdateGuiFont(Renderer *renderer, const char *guifont, size_t strlen) {
 	if (strlen == 0) {
 		return false;
 	}
 
-	const char *size_str = strstr(guifont, ":h");
-	if (!size_str) {
-		return false;
-	}
+	wchar_t fonts[MAX_GUIFONT_FONTS][MAX_FONT_LENGTH];
+	int font_count = 0;
+	float font_size = 0.0f;
 
-	size_t font_str_len = size_str - guifont;
-	size_t size_str_len = strlen - (font_str_len + 2);
-	size_str += 2;
+	const char *guifont_end = guifont + strlen;
+	const char *entry = guifont;
+	while (entry < guifont_end) {
+		const char *entry_end = static_cast<const char *>(memchr(entry, ',', guifont_end - entry));
+		if (!entry_end) entry_end = guifont_end;
 
-	const char *fallback_font_str = strstr(size_str, ":");
-	if(fallback_font_str) {
-		fallback_font_str += 1;
-		size_t fallback_font_str_len = strlen - (fallback_font_str - guifont);
+		const char *part = entry;
+		bool is_font_name = true;
+		while (true) {
+			const char *part_end = static_cast<const char *>(memchr(part, ':', entry_end - part));
+			if (!part_end) part_end = entry_end;
+			size_t part_length = part_end - part;
 
-		int wstrlen = MultiByteToWideChar(CP_UTF8, 0, fallback_font_str, fallback_font_str_len, 0, 0);
-		if (wstrlen != 0 && wstrlen < MAX_FONT_LENGTH) {
-			MultiByteToWideChar(CP_UTF8, 0, fallback_font_str, fallback_font_str_len, renderer->fallback_font, MAX_FONT_LENGTH - 1);
-			renderer->fallback_font[wstrlen] = L'\0';
+			if (is_font_name || !IsGuiFontOption(part, part_length)) {
+				AddGuiFontName(fonts, &font_count, part, part_length);
+			}
+			else if (part[0] == 'h' && font_size == 0.0f && part_length < 32) {
+				char font_size_str[32];
+				memcpy(font_size_str, part + 1, part_length - 1);
+				font_size_str[part_length - 1] = '\0';
+				font_size = static_cast<float>(atof(font_size_str));
+			}
+
+			is_font_name = false;
+			if (part_end == entry_end) break;
+			part = part_end + 1;
 		}
 
-		size_str_len -= fallback_font_str_len;
+		entry = entry_end + 1;
 	}
 
-	float font_size = DEFAULT_FONT_SIZE;
-	// Assume font size part of string is less than 256 characters
-	if(size_str_len < 256) {
-		char font_size_str[256];
-		memcpy(font_size_str, size_str, size_str_len);
-		font_size_str[size_str_len] = '\0';
-		font_size = static_cast<float>(atof(font_size_str));
+	if (font_size <= 0.0f) {
+		font_size = renderer->last_requested_font_size > 0.0f ? renderer->last_requested_font_size : DEFAULT_FONT_SIZE;
 	}
 
-	return RendererUpdateFont(renderer, font_size, guifont, static_cast<int>(font_str_len));
+	int main_font = -1;
+	renderer->guifont_fallback_count = 0;
+	for (int i = 0; i < font_count; ++i) {
+		bool exists = FontFamilyExists(renderer, fonts[i]);
+		// Like gvim, allow underscores in place of spaces
+		if (!exists && wcschr(fonts[i], L'_')) {
+			wchar_t font_with_spaces[MAX_FONT_LENGTH];
+			wcscpy_s(font_with_spaces, MAX_FONT_LENGTH, fonts[i]);
+			for (wchar_t *c = font_with_spaces; *c; ++c) {
+				if (*c == L'_') *c = L' ';
+			}
+			if ((exists = FontFamilyExists(renderer, font_with_spaces))) {
+				wcscpy_s(fonts[i], MAX_FONT_LENGTH, font_with_spaces);
+			}
+		}
+		if (!exists) continue;
+
+		if (main_font < 0) {
+			main_font = i;
+		}
+		else {
+			wcscpy_s(renderer->guifont_fallbacks[renderer->guifont_fallback_count++], MAX_FONT_LENGTH, fonts[i]);
+		}
+	}
+	UpdateFontFallback(renderer);
+
+	// No font name keeps the current font, a font which doesn't exist
+	// makes UpdateFontMetrics use the fallback font
+	char font_name[MAX_FONT_LENGTH * 3];
+	int font_name_length = 0;
+	if (font_count > 0) {
+		font_name_length = WideCharToMultiByte(CP_UTF8, 0, fonts[main_font >= 0 ? main_font : 0], -1,
+			font_name, sizeof(font_name), NULL, NULL);
+		font_name_length = max(0, font_name_length - 1);
+	}
+	return RendererUpdateFont(renderer, font_size, font_name, font_name_length);
 }
 
 void SetGuiOptions(Renderer *renderer, mpack_node_t option_set) {

@@ -80,6 +80,7 @@ constexpr int MAX_HIGHLIGHT_ATTRIBS = 0xFFFF;
 constexpr int MAX_CURSOR_MODE_INFOS = 64;
 constexpr int MAX_FONT_LENGTH = 128;
 constexpr int MAX_COMPOSITION_CLAUSES = 64;
+constexpr int MAX_GUIFONT_FONTS = 8;
 constexpr float DEFAULT_DPI = 96.0f;
 constexpr float POINTS_PER_INCH = 72.0f;
 struct GlyphDrawingEffect;
@@ -115,6 +116,10 @@ struct Renderer {
     float last_requested_font_size;
 	wchar_t font[MAX_FONT_LENGTH];
 	wchar_t fallback_font[MAX_FONT_LENGTH];
+	// The other fonts listed in guifont, used for glyphs missing from the main font
+	wchar_t guifont_fallbacks[MAX_GUIFONT_FONTS][MAX_FONT_LENGTH];
+	int guifont_fallback_count;
+	IDWriteFontFallback *dwrite_font_fallback;
 	DWRITE_FONT_METRICS1 font_metrics;
 	float font_size_scale_bold;
 	float dpi_scale;

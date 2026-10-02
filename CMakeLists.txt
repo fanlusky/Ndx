@@ -4,10 +4,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-project(Nvy)
-add_executable(Nvy WIN32 "resources/third_party/nvim_icon.rc" version_info.rc)
+project(Ndx)
+add_executable(Ndx WIN32 "resources/third_party/nvim_icon.rc" version_info.rc)
 
-set(Nvy_HEADERS
+set(Ndx_HEADERS
     "src/common/dx_helper.h"
     "src/common/mpack_helper.h"
     "src/common/vec.h"
@@ -19,7 +19,7 @@ set(Nvy_HEADERS
     "src/third_party/mpack/mpack.h"
 )
 
-set(Nvy_SOURCES
+set(Ndx_SOURCES
     "src/main.cpp"
     "src/nvim/nvim.cpp"
     "src/renderer/glyph_renderer.cpp"
@@ -28,16 +28,16 @@ set(Nvy_SOURCES
     "src/third_party/mpack/mpack.c"
 )
 
-target_sources(Nvy PUBLIC
-    ${Nvy_HEADERS} 
-    ${Nvy_SOURCES}
+target_sources(Ndx PUBLIC
+    ${Ndx_HEADERS} 
+    ${Ndx_SOURCES}
 )
 
-target_include_directories(Nvy PUBLIC
+target_include_directories(Ndx PUBLIC
     "src/"
 )
 
-target_link_libraries(Nvy PUBLIC 
+target_link_libraries(Ndx PUBLIC 
     user32.lib 
     d3d11.lib 
     d2d1.lib 
@@ -49,7 +49,7 @@ target_link_libraries(Nvy PUBLIC
     uuid.lib
 )
 
-target_precompile_headers(Nvy PUBLIC
+target_precompile_headers(Ndx PUBLIC
     <cassert>
     <cmath>
     <cstdint>
@@ -72,7 +72,7 @@ target_precompile_headers(Nvy PUBLIC
     "src/common/window_messages.h"
 )
 
-target_compile_definitions(Nvy PUBLIC
+target_compile_definitions(Ndx PUBLIC
     MPACK_EXTENSIONS
     UNICODE
 )

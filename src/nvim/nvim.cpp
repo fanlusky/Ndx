@@ -139,11 +139,11 @@ void NvimInitialize(Nvim *nvim, wchar_t *command_line, HWND hwnd) {
 		assert(api_level > 6);
 	}
 
-	// Set g:nvy global variable
+	// Set g:ndx global variable
 	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
 	MPackStartNotification(NVIM_OUTBOUND_NOTIFICATION_NAMES[nvim_set_var], &writer);
 	mpack_start_array(&writer, 2);
-	mpack_write_cstr(&writer, "nvy");
+	mpack_write_cstr(&writer, "ndx");
 	mpack_write_int(&writer, 1);
 	mpack_finish_array(&writer);
 	size = MPackFinishMessage(&writer);

@@ -502,27 +502,30 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 		// Otherwise assume the argument is a filename to open
 		else {
 			// Otherwise assume switch is for nvim initialization
-			const size_t arg_len = wcslen(cmd_line_args[i])  /* space */;
-			if (nvim_cmd_len + arg_len + 4 >= 32767) {
-				MessageBoxA(NULL, "ERROR: File path too long", "Nvy", MB_OK | MB_ICONERROR);
+			const size_t arg_len = wcslen(cmd_line_args[i]);
+			// Number of wchars including ' "', '"' and the terminator. The wcscat_s
+			// sizes must be in elements, not bytes, otherwise the debug CRT fills
+			// past the end of the buffer and corrupts the heap
+			const size_t new_cmd_size = nvim_cmd_len + arg_len + 4;
+			if (new_cmd_size >= 32767) {
+				MessageBoxA(NULL, "ERROR: File path too long", "Ndx", MB_OK | MB_ICONERROR);
 				return 1;
 			}
-			size_t tmp_len = sizeof(wchar_t) * (nvim_cmd_len + arg_len + 4);
-			wchar_t *tmp = static_cast<wchar_t *>(realloc(nvim_cmd, tmp_len));
+			wchar_t *tmp = static_cast<wchar_t *>(realloc(nvim_cmd, new_cmd_size * sizeof(wchar_t)));
 			if (tmp) {
 				nvim_cmd = tmp;
-				nvim_cmd_len = tmp_len;
-				wcscat_s(nvim_cmd, tmp_len, L" \"");
-				wcscat_s(nvim_cmd, tmp_len,cmd_line_args[i]);
-				wcscat_s(nvim_cmd, tmp_len, L"\"");
+				wcscat_s(nvim_cmd, new_cmd_size, L" \"");
+				wcscat_s(nvim_cmd, new_cmd_size, cmd_line_args[i]);
+				wcscat_s(nvim_cmd, new_cmd_size, L"\"");
+				nvim_cmd_len = wcslen(nvim_cmd);
 			} else {
 				break; // not enough memory to continue
 			}
 		}
 	}
 
-	const wchar_t *window_class_name = L"Nvy_Class";
-	const wchar_t *window_title = L"Nvy";
+	const wchar_t *window_class_name = L"Ndx_Class";
+	const wchar_t *window_title = L"Ndx";
 	WNDCLASSEX window_class {
 		.cbSize = sizeof(WNDCLASSEX),
 		.style = CS_HREDRAW | CS_VREDRAW,
@@ -577,6 +580,16 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 	if (hwnd == NULL) return 1;
 	context.hwnd = hwnd;
 	context.hkl = GetKeyboardLayout(0);
+
+	// The system default size is rather wide, shrink it to 2/3 of the width
+	// unless an explicit size is requested with --geometry
+	if (start_rows == 0 && start_cols == 0) {
+		RECT default_rect;
+		GetWindowRect(hwnd, &default_rect);
+		SetWindowPos(hwnd, nullptr, 0, 0, (default_rect.right - default_rect.left) * 2 / 3,
+			default_rect.bottom - default_rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+
 	RECT window_rect;
 	DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &window_rect, sizeof(RECT));
 	HMONITOR monitor = MonitorFromPoint({window_rect.left, window_rect.top}, MONITOR_DEFAULTTONEAREST);
@@ -653,7 +666,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 			msg[len] = 0;
 		}
 		if (len > 0) {
-			MessageBoxA(NULL, msg, "Nvy", MB_OK | MB_ICONERROR);
+			MessageBoxA(NULL, msg, "Ndx", MB_OK | MB_ICONERROR);
 			free(msg);
 		}
 
