@@ -8,3 +8,7 @@
 
 // WPARAM: none, LPARAM: none
 #define WM_TSF_PROCESS_PENDING (WM_USER + 2)
+
+// Does nothing, wakes up the message loop to schedule the animations
+// WPARAM: none, LPARAM: none
+#define WM_RENDERER_ANIMATE (WM_USER + 3)

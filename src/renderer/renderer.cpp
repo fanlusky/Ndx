@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "renderer/cursor_animation.h"
 #include "renderer/glyph_renderer.h"
+#include "renderer/scroll_animation.h"
 
 void InitializeD2D(Renderer *renderer) {
 	D2D1_FACTORY_OPTIONS options {};
@@ -70,6 +71,7 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 	renderer->d3d_context->Flush();
 	// Recreated with the new size on the next draw
 	SafeRelease(&renderer->d2d_grid_bitmap);
+	ScrollAnimationReset(renderer->scroll_animation);
 
 	if (renderer->dxgi_swapchain) {
 		renderer->d2d_target_bitmap->Release();
@@ -156,6 +158,7 @@ void HandleDeviceLost(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_context);
 	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
+	ScrollAnimationReleaseResources(renderer->scroll_animation);
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
@@ -221,8 +224,15 @@ void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, f
 	// Too big for the stack, the renderer lives in wWinMain
 	renderer->cursor_animation = static_cast<CursorAnimation *>(malloc(sizeof(CursorAnimation)));
 	CursorAnimationInitialize(renderer->cursor_animation);
+	renderer->scroll_animation = static_cast<ScrollAnimation *>(malloc(sizeof(ScrollAnimation)));
+	ScrollAnimationInitialize(renderer->scroll_animation);
 	renderer->window_focused = true;
 	QueryPerformanceFrequency(&renderer->performance_frequency);
+	renderer->animation_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+	if (!renderer->animation_timer) {
+		// Before Windows 10 1803
+		renderer->animation_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+	}
 
 	InitializeLocale(renderer);
 
@@ -259,6 +269,9 @@ void RendererShutdown(Renderer *renderer) {
 	SafeRelease(&renderer->font_face);
 	delete renderer->glyph_renderer;
 	free(renderer->cursor_animation);
+	ScrollAnimationReleaseResources(renderer->scroll_animation);
+	free(renderer->scroll_animation);
+	CloseHandle(renderer->animation_timer);
 
 	free(renderer->grid_chars);
 	free(renderer->wchar_buffer);
@@ -780,6 +793,14 @@ void MarkRowDirty(Renderer *renderer, int row) {
 	}
 }
 
+// The cursor is drawn into the grid without the animations, so its row has to be
+// drawn again when it moves away
+void MarkCursorRowDirty(Renderer *renderer) {
+	if (!renderer->animation_active) {
+		MarkRowDirty(renderer, renderer->cursor.row);
+	}
+}
+
 void DrawDirtyGridLines(Renderer *renderer) {
 	if (!renderer->dirty_rows) return;
 
@@ -1005,9 +1026,10 @@ ID2D1PathGeometry *CreateUnfocusedOutline(Renderer *renderer, ID2D1PathGeometry 
 	return outline;
 }
 
-void DrawAnimatedCursor(Renderer *renderer, CursorCell *cell, const CursorAnimationTarget *target) {
+void DrawAnimatedCursor(Renderer *renderer, CursorCell *cell, const CursorAnimationTarget *target, float opacity) {
 	const CursorAnimation *animation = renderer->cursor_animation;
 	ID2D1DeviceContext4 *context = renderer->d2d_context;
+	if (opacity <= 0.0f) return;
 
 	// Snap the corners to whole pixels relative to the cell, so the resting cursor is crisp
 	float fract_x = target->x - floorf(target->x);
@@ -1023,12 +1045,18 @@ void DrawAnimatedCursor(Renderer *renderer, CursorCell *cell, const CursorAnimat
 	ID2D1PathGeometry *geometry = CreateQuadGeometry(renderer, points);
 	if (!geometry) return;
 
-	if (!renderer->window_focused && target->shape == CursorShape::Block) {
+	if (!renderer->window_focused && target->shape == CursorShape::Block && animation->settings.enabled) {
 		float outline_width = animation->settings.unfocused_outline_width * renderer->font_size;
 		if (ID2D1PathGeometry *outline = CreateUnfocusedOutline(renderer, geometry, outline_width)) {
 			geometry->Release();
 			geometry = outline;
 		}
+	}
+
+	// Fading with smooth blinking
+	if (opacity < 1.0f) {
+		context->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_ALIASED,
+			D2D1::IdentityMatrix(), opacity), nullptr);
 	}
 
 	D2D1_ANTIALIAS_MODE antialias_mode = animation->settings.antialiasing ?
@@ -1051,6 +1079,9 @@ void DrawAnimatedCursor(Renderer *renderer, CursorCell *cell, const CursorAnimat
 		context->PopLayer();
 	}
 
+	if (opacity < 1.0f) {
+		context->PopLayer();
+	}
 	geometry->Release();
 }
 
@@ -1142,6 +1173,7 @@ bool UpdateGridSize(Renderer *renderer, mpack_node_t grid_resize) {
 		free(renderer->dirty_rows);
 		renderer->dirty_rows = static_cast<bool *>(calloc(grid_rows, sizeof(bool)));
 		renderer->draws_invalidated = true;
+		ScrollAnimationReset(renderer->scroll_animation);
 
 		renderer->grid_initialized = true;
 		return true;
@@ -1453,6 +1485,14 @@ void UpdateCursorModeInfos(Renderer *renderer, mpack_node_t mode_info_set_params
 		if (!mpack_node_is_missing(hl_attrib_index)) {
 			renderer->cursor_mode_infos[i].hl_attrib_id = static_cast<int>(hl_attrib_index.data->value.i);
 		}
+
+		const auto GetBlinkTime = [&](const char *name) {
+			mpack_node_t time = mpack_node_map_cstr_optional(mode_info_map, name);
+			return mpack_node_is_missing(time) ? 0 : static_cast<int>(NodeToFloat(time, 0.0f));
+		};
+		renderer->cursor_mode_infos[i].blinkwait = GetBlinkTime("blinkwait");
+		renderer->cursor_mode_infos[i].blinkon = GetBlinkTime("blinkon");
+		renderer->cursor_mode_infos[i].blinkoff = GetBlinkTime("blinkoff");
 	}
 }
 
@@ -1469,9 +1509,15 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
 		int64_t rows = mpack_node_array_at(scroll_region_params, 5).data->value.i;
 		int64_t cols = mpack_node_array_at(scroll_region_params, 6).data->value.i;
 
-		// Currently nvim does not support horizontal scrolling, 
+		// Currently nvim does not support horizontal scrolling,
 		// the parameter is reserved for later use
 		assert(cols == 0);
+
+		// With the animations the grid is drawn into a bitmap of our own, where the drawn
+		// rows can simply be moved. Then only rows with pending changes are drawn again.
+		bool grid_shifted = renderer->animation_active && !renderer->draws_invalidated && renderer->dirty_rows &&
+			ScrollAnimationShiftGrid(renderer, static_cast<int>(top), static_cast<int>(bottom),
+				static_cast<int>(left), static_cast<int>(right), static_cast<int>(rows));
 
 		// This part is slightly cryptic, basically we're just
 		// iterating from top to bottom or vice versa depending on scroll direction.
@@ -1504,12 +1550,36 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
 			// nvim since it can require multiple scrolls per frame, the latter
 			// I can't seem to make work with the FLIP_SEQUENTIAL swapchain model.
 			// Thus we fall back to drawing the appropriate scrolled grid lines
-			MarkRowDirty(renderer, static_cast<int>(target_row));
+			if (!grid_shifted) {
+				MarkRowDirty(renderer, static_cast<int>(target_row));
+			}
+			// Pending changes move along with the row. The source row is read before
+			// it is overwritten as a target, since rows are visited in scroll order.
+			else if (renderer->dirty_rows[j]) {
+				MarkRowDirty(renderer, static_cast<int>(target_row));
+			}
+		}
+
+		if (grid_shifted) {
+			// The uncovered rows show stale pixels until nvim redraws them
+			int64_t uncovered_start = rows > 0 ? bottom - rows : top;
+			int64_t uncovered_end = rows > 0 ? bottom : top - rows;
+			for (int64_t j = uncovered_start; j < uncovered_end; ++j) {
+				MarkRowDirty(renderer, static_cast<int>(j));
+			}
+			// The composition string drawn into the grid moved along as well
+			if (renderer->composition_drawn && renderer->composition_drawn_row >= top &&
+				renderer->composition_drawn_row < bottom) {
+				MarkRowDirty(renderer, static_cast<int>(renderer->composition_drawn_row - rows));
+			}
 		}
 
 		// Redraw the line which the cursor has moved to, as it is no
-		// longer guaranteed that the cursor is still there
-		MarkRowDirty(renderer, static_cast<int>(renderer->cursor.row - rows));
+		// longer guaranteed that the cursor is still there. The animated
+		// cursor isn't drawn into the grid.
+		if (!renderer->animation_active) {
+			MarkRowDirty(renderer, static_cast<int>(renderer->cursor.row - rows));
+		}
 	}
 }
 
@@ -1716,19 +1786,22 @@ void ClearGrid(Renderer *renderer) {
 		.bottom = renderer->grid_rows * renderer->font_height
 	};
 	DrawBackgroundRect(renderer, rect, &renderer->hl_attribs[0]);
+	ScrollAnimationReset(renderer->scroll_animation);
 }
 
-// Turns the cursor animation on or off once the settings change. The grid
-// is then drawn into another target, so it is drawn again from scratch.
-void UpdateCursorAnimationActive(Renderer *renderer) {
-	bool enabled = renderer->cursor_animation->settings.enabled;
-	if (enabled == renderer->cursor_animation_active) return;
+// Turns the animations on or off once the settings change. The grid is
+// then drawn into another target, so it is drawn again from scratch.
+void UpdateAnimationActive(Renderer *renderer) {
+	bool enabled = renderer->cursor_animation->settings.enabled || renderer->scroll_animation->settings.enabled;
+	if (enabled == renderer->animation_active) return;
 
-	renderer->cursor_animation_active = enabled;
+	renderer->animation_active = enabled;
 	renderer->cursor_animating = false;
+	renderer->scroll_animating = false;
 	renderer->draws_invalidated = true;
 	if (!enabled) {
 		SafeRelease(&renderer->d2d_grid_bitmap);
+		ScrollAnimationReleaseResources(renderer->scroll_animation);
 	}
 }
 
@@ -1750,23 +1823,29 @@ void CreateGridBitmap(Renderer *renderer) {
 	renderer->draws_invalidated = true;
 }
 
+// Waits until the swapchain is ready for the next frame, must be followed by a Present
+void WaitForSwapchain(Renderer *renderer) {
+	WaitForSingleObjectEx(
+		renderer->swapchain_wait_handle,
+		1000,
+		true
+	);
+}
+
 void StartDraw(Renderer *renderer) {
 	if (!renderer->draw_active) {
-		if (!renderer->swapchain_wait_done) {
-			WaitForSingleObjectEx(
-				renderer->swapchain_wait_handle,
-				1000,
-				true
-			);
+		UpdateAnimationActive(renderer);
+		// With the animations, only drawing the frame from the grid has to wait for the
+		// swapchain, nvim's changes are drawn into the grid bitmap meanwhile
+		if (!renderer->animation_active) {
+			WaitForSwapchain(renderer);
 		}
-		renderer->swapchain_wait_done = false;
 
-		UpdateCursorAnimationActive(renderer);
-		if (renderer->cursor_animation_active && !renderer->d2d_grid_bitmap) {
+		if (renderer->animation_active && !renderer->d2d_grid_bitmap) {
 			CreateGridBitmap(renderer);
 		}
 
-		renderer->d2d_context->SetTarget(renderer->cursor_animation_active ?
+		renderer->d2d_context->SetTarget(renderer->animation_active ?
 			renderer->d2d_grid_bitmap : renderer->d2d_target_bitmap);
 		renderer->d2d_context->BeginDraw();
 		renderer->d2d_context->SetTransform(D2D1::IdentityMatrix());
@@ -1789,22 +1868,42 @@ void CopyFrontToBack(Renderer *renderer) {
 float NextAnimationTimeStep(Renderer *renderer) {
 	LARGE_INTEGER now;
 	QueryPerformanceCounter(&now);
-	float dt = static_cast<float>(now.QuadPart - renderer->cursor_animation_last_frame.QuadPart) /
+	float dt = static_cast<float>(now.QuadPart - renderer->animation_last_frame.QuadPart) /
 		static_cast<float>(renderer->performance_frequency.QuadPart);
-	renderer->cursor_animation_last_frame = now;
+	renderer->animation_last_frame = now;
 
 	// After being idle, the time since the last frame says nothing about
 	// the frame rate, start the animation with a typical frame instead
-	return renderer->cursor_animating ? min(dt, 0.1f) : min(dt, 1.0f / 60.0f);
+	bool animating = renderer->cursor_animating || renderer->scroll_animating;
+	return animating ? min(dt, 0.1f) : min(dt, 1.0f / 60.0f);
 }
 
-// Draws the grid with the animated cursor and its particles on top to the back buffer
+double NowInSeconds(Renderer *renderer) {
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	return static_cast<double>(now.QuadPart) / static_cast<double>(renderer->performance_frequency.QuadPart);
+}
+
+CursorBlinkTimes GetCursorBlinkTimes(Renderer *renderer) {
+	const CursorModeInfo *mode_info = renderer->cursor.mode_info;
+	return CursorBlinkTimes {
+		.blinkwait = mode_info->blinkwait,
+		.blinkon = mode_info->blinkon,
+		.blinkoff = mode_info->blinkoff
+	};
+}
+
+// Draws the grid with the scrolling regions, the animated cursor and its particles on top to the back buffer
 void ComposeFrame(Renderer *renderer) {
 	ID2D1DeviceContext4 *context = renderer->d2d_context;
 	context->SetTarget(renderer->d2d_target_bitmap);
 	context->DrawImage(renderer->d2d_grid_bitmap, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
 
 	float dt = NextAnimationTimeStep(renderer);
+	ScrollAnimationOnFlush(renderer->scroll_animation);
+	renderer->scroll_animating = ScrollAnimationUpdate(renderer->scroll_animation, dt, renderer->font_height);
+	ScrollAnimationDraw(renderer);
+
 	CursorCell cell;
 	if (!GetCursorCell(renderer, &cell)) {
 		renderer->cursor_animating = false;
@@ -1816,43 +1915,68 @@ void ComposeFrame(Renderer *renderer) {
 	bool changed_to_from_cmdline = renderer->in_cmdline_mode != renderer->cursor_animation_was_in_cmdline;
 	renderer->cursor_animation_was_in_cmdline = renderer->in_cmdline_mode;
 
+	// The cursor stays on its text while it scrolls
+	float scroll_delta_y;
+	float scroll_offset_y = ScrollAnimationCellOffset(renderer, renderer->cursor.row, renderer->cursor.col, &scroll_delta_y);
+
 	// Same size as the cursor drawn by DrawCursor, the bars are 2 pixels wide
 	CursorShape shape = renderer->cursor.mode_info->shape;
 	float width = renderer->font_width * cell.width;
 	CursorAnimationTarget target {
 		.x = renderer->cursor.col * renderer->font_width,
-		.y = renderer->cursor.row * renderer->font_height,
+		.y = renderer->cursor.row * renderer->font_height + scroll_offset_y,
 		.width = width,
 		.height = renderer->font_height,
 		.shape = shape,
 		.cell_percentage = shape == CursorShape::Vertical ? 2.0f / width : 2.0f / renderer->font_height,
-		.immediate = (!settings->animate_in_insert_mode && renderer->in_insert_mode) ||
+		.immediate = !settings->enabled ||
+			(!settings->animate_in_insert_mode && renderer->in_insert_mode) ||
 			(!settings->animate_command_line && changed_to_from_cmdline),
+		.scroll_delta_y = scroll_delta_y,
 		.color = CreateBackgroundColor(renderer, &cell.hl_attribs)
 	};
 	renderer->cursor_animating = CursorAnimationUpdate(animation, &target, dt);
 
-	// The composition string has a caret of its own
-	if (!renderer->ui_busy && renderer->composition_length == 0) {
-		DrawAnimatedCursor(renderer, &cell, &target);
+	CursorBlinkTimes blink_times = GetCursorBlinkTimes(renderer);
+	double now = NowInSeconds(renderer);
+	CursorBlinkUpdate(&animation->blink, &blink_times, renderer->cursor.row, renderer->cursor.col,
+		renderer->cursor.mode_info, now);
+	bool cursor_visible = true;
+	float cursor_opacity = 1.0f;
+	if (settings->smooth_blink) {
+		// Fading takes every frame, not only the ones where the cursor turns on or off
+		cursor_opacity = CursorBlinkOpacity(&animation->blink, &blink_times, now);
+		renderer->cursor_animating |= animation->blink.state != BlinkState::Waiting;
 	}
-	DrawCursorVfx(renderer, target.color);
+	else {
+		cursor_visible = CursorBlinkVisible(&animation->blink);
+	}
+
+	// The composition string has a caret of its own
+	if (cursor_visible && !renderer->ui_busy && renderer->composition_length == 0) {
+		DrawAnimatedCursor(renderer, &cell, &target, cursor_opacity);
+	}
+	if (settings->enabled) {
+		DrawCursorVfx(renderer, target.color);
+	}
 }
 
 void FinishDraw(Renderer *renderer) {
-	if (renderer->cursor_animation_active) {
+	if (renderer->animation_active) {
+		WaitForSwapchain(renderer);
 		ComposeFrame(renderer);
 	}
 	renderer->d2d_context->EndDraw();
 
-	// Animation frames are paced by the display, everything else is shown right away
-	bool vsync = renderer->cursor_animation_active && renderer->cursor_animating;
-	HRESULT hr = renderer->dxgi_swapchain->Present(vsync ? 1 : 0, vsync ? 0 : DXGI_PRESENT_ALLOW_TEARING);
+	// Animation frames are already paced to the display by RendererScheduleAnimationFrame, they mustn't
+	// tear. Waiting for the display with a sync interval would stall while the window isn't shown.
+	bool animating = renderer->animation_active && (renderer->cursor_animating || renderer->scroll_animating);
+	HRESULT hr = renderer->dxgi_swapchain->Present(0, animating ? 0 : DXGI_PRESENT_ALLOW_TEARING);
 	renderer->draw_active = false;
 
 	// The frame is composed from scratch with the animation, otherwise
 	// the next one is drawn on top of this one
-	if (!renderer->cursor_animation_active) {
+	if (!renderer->animation_active) {
 		CopyFrontToBack(renderer);
 	}
 
@@ -1866,32 +1990,124 @@ void RendererFlush(Renderer* renderer) {
 	ClearComposition(renderer);
 	DrawDirtyGridLines(renderer);
 	// The animated cursor is drawn over the grid when composing the frame
-	if (!renderer->ui_busy && !renderer->cursor_animation_active) {
+	if (!renderer->ui_busy && !renderer->animation_active) {
 		DrawCursor(renderer);
 	}
 	DrawComposition(renderer);
 	DrawBorderRectangles(renderer);
+
+	// While animating, frames are drawn in step with the display. Presenting nvim's
+	// changes in between would show the animation at uneven times, so they are
+	// only drawn into the grid and shown with the next animation frame.
+	if (!renderer->drawing_animation_frame && RendererIsAnimating(renderer)) {
+		renderer->d2d_context->EndDraw();
+		renderer->draw_active = false;
+		return;
+	}
 	FinishDraw(renderer);
 }
 
 bool RendererIsAnimating(Renderer *renderer) {
-	return renderer->cursor_animation_active && renderer->cursor_animating && renderer->dxgi_swapchain;
+	return renderer->animation_active && (renderer->cursor_animating || renderer->scroll_animating) &&
+		renderer->dxgi_swapchain;
+}
+
+HANDLE RendererScheduleAnimationFrame(Renderer *renderer) {
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	int64_t period = renderer->performance_frequency.QuadPart / 60;
+	int64_t next_frame = now.QuadPart + period;
+
+	// Draw right after the next vertical blank, so the frame is ready for the following one
+	DWM_TIMING_INFO timing_info { .cbSize = sizeof(DWM_TIMING_INFO) };
+	if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &timing_info)) && timing_info.qpcRefreshPeriod > 0) {
+		period = static_cast<int64_t>(timing_info.qpcRefreshPeriod);
+		// This is usually the upcoming vertical blank, rounding towards zero
+		// would then skip it and draw only every other refresh
+		int64_t since_vblank = now.QuadPart - static_cast<int64_t>(timing_info.qpcVBlank);
+		int64_t refreshes = since_vblank >= 0 ? since_vblank / period : -((-since_vblank + period - 1) / period);
+		next_frame = static_cast<int64_t>(timing_info.qpcVBlank) + (refreshes + 1) * period;
+	}
+	// At most one frame per refresh, e.g. when nvim just had one drawn
+	if (next_frame - renderer->animation_last_frame.QuadPart < period / 2) {
+		next_frame += period;
+	}
+
+	// Relative due times are negative, in 100ns units
+	LARGE_INTEGER due_time {
+		.QuadPart = -max(1ll, (next_frame - now.QuadPart) * 10'000'000 / renderer->performance_frequency.QuadPart)
+	};
+	SetWaitableTimer(renderer->animation_timer, &due_time, 0, nullptr, nullptr, false);
+	return renderer->animation_timer;
 }
 
 void RendererAnimate(Renderer *renderer) {
-	// The caller already waited for the swapchain
-	renderer->swapchain_wait_done = true;
+	renderer->drawing_animation_frame = true;
 	RendererFlush(renderer);
+	renderer->drawing_animation_frame = false;
 }
 
-void RendererSetCursorOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value) {
-	constexpr const char *PREFIX = "ndx_cursor_";
-	size_t prefix_length = strlen(PREFIX);
-	if (length <= prefix_length || strncmp(name, PREFIX, prefix_length)) return;
+DWORD RendererGetBlinkTimeout(Renderer *renderer) {
+	CursorCell cell;
+	if (!renderer->animation_active || !renderer->dxgi_swapchain || !GetCursorCell(renderer, &cell)) {
+		return INFINITE;
+	}
 
-	if (!CursorAnimationSetOption(renderer->cursor_animation, name + prefix_length, length - prefix_length, value)) {
+	CursorBlinkTimes blink_times = GetCursorBlinkTimes(renderer);
+	double deadline = CursorBlinkDeadline(&renderer->cursor_animation->blink, &blink_times);
+	if (isinf(deadline)) return INFINITE;
+
+	double remaining = deadline - NowInSeconds(renderer);
+	return remaining > 0.0 ? static_cast<DWORD>(ceil(remaining * 1000.0)) : 0;
+}
+
+void RendererScrollWindows(Renderer *renderer, mpack_node_t scrolls) {
+	if (!renderer->animation_active || !renderer->grid_initialized || !renderer->dxgi_swapchain ||
+		mpack_node_type(scrolls) != mpack_type_array) {
 		return;
 	}
+
+	// The region's content is saved before nvim's redraw arrives. Unless nvim is in the
+	// middle of a redraw, the drawing for that ends here, nothing has to be presented.
+	bool was_drawing = renderer->draw_active;
+	StartDraw(renderer);
+	size_t scroll_count = mpack_node_array_length(scrolls);
+	for (size_t i = 0; i < scroll_count; ++i) {
+		mpack_node_t scroll = mpack_node_array_at(scrolls, i);
+		if (mpack_node_type(scroll) != mpack_type_array || mpack_node_array_length(scroll) < 5) continue;
+
+		int values[5];
+		for (int j = 0; j < 5; ++j) {
+			values[j] = static_cast<int>(NodeToFloat(mpack_node_array_at(scroll, j), 0.0f));
+		}
+		int top = max(values[0], 0);
+		int bottom = min(values[1], renderer->grid_rows);
+		int left = max(values[2], 0);
+		int right = min(values[3], renderer->grid_cols);
+		ScrollAnimationOnScroll(renderer, top, bottom, left, right, values[4]);
+	}
+	if (!was_drawing) {
+		renderer->d2d_context->EndDraw();
+		renderer->draw_active = false;
+	}
+}
+
+bool HasPrefix(const char *name, size_t length, const char *prefix) {
+	size_t prefix_length = strlen(prefix);
+	return length > prefix_length && !strncmp(name, prefix, prefix_length);
+}
+
+void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value) {
+	bool known = false;
+	if (HasPrefix(name, length, "ndx_cursor_")) {
+		size_t prefix_length = strlen("ndx_cursor_");
+		known = CursorAnimationSetOption(renderer->cursor_animation, name + prefix_length, length - prefix_length, value);
+	}
+	else if (HasPrefix(name, length, "ndx_scroll_")) {
+		size_t prefix_length = strlen("ndx_scroll_");
+		known = ScrollAnimationSetOption(renderer->scroll_animation, name + prefix_length, length - prefix_length, value);
+	}
+	if (!known) return;
 
 	// Show the change right away unless nvim is in the middle of a redraw
 	if (renderer->grid_initialized && renderer->dxgi_swapchain && !renderer->draw_active) {
@@ -1903,7 +2119,7 @@ void RendererSetFocus(Renderer *renderer, bool focused) {
 	renderer->window_focused = focused;
 
 	// The animated cursor is drawn as an outline while unfocused
-	if (renderer->cursor_animation_active && renderer->grid_initialized && !renderer->draw_active) {
+	if (renderer->animation_active && renderer->grid_initialized && !renderer->draw_active) {
 		RendererFlush(renderer);
 	}
 }
@@ -1942,7 +2158,7 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 		else if (MPackMatchString(redraw_command_name, "grid_cursor_goto")) {
 			// If the old cursor position is still within the row bounds,
 			// redraw the line to get rid of the cursor
-			MarkRowDirty(renderer, renderer->cursor.row);
+			MarkCursorRowDirty(renderer);
 			UpdateCursorPos(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "mode_info_set")) {
@@ -1950,7 +2166,7 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 		}
 		else if (MPackMatchString(redraw_command_name, "mode_change")) {
 			// Redraw cursor if its inside the bounds
-			MarkRowDirty(renderer, renderer->cursor.row);
+			MarkCursorRowDirty(renderer);
 			UpdateCursorMode(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "set_title")) {
@@ -1959,7 +2175,7 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 		else if (MPackMatchString(redraw_command_name, "busy_start")) {
 			renderer->ui_busy = true;
 			// Hide cursor while UI is busy
-			MarkRowDirty(renderer, renderer->cursor.row);
+			MarkCursorRowDirty(renderer);
 		}
 		else if (MPackMatchString(redraw_command_name, "busy_stop")) {
 			renderer->ui_busy = false;

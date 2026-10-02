@@ -166,12 +166,68 @@ void NvimInitialize(Nvim *nvim, wchar_t *command_line, HWND hwnd) {
 	}
 	result = MPackExtractMessageResult(tree_reader); // get the result just in case...
 
-	// Forward changes of the g:ndx_cursor_* variables, which configure the cursor animation
+	// Forward changes of the g:ndx_* variables, which configure the animations
 	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
 	MPackStartRequest(RegisterRequest(nvim, nvim_command), NVIM_REQUEST_NAMES[nvim_command], &writer);
 	mpack_start_array(&writer, 1);
-	mpack_write_cstr(&writer, "call dictwatcheradd(g:, 'ndx_cursor_*', "
+	mpack_write_cstr(&writer, "call dictwatcheradd(g:, 'ndx_*', "
 		"{d, k, z -> rpcnotify(1, 'ndx_option', k, get(z, 'new', v:null))})");
+	mpack_finish_array(&writer);
+	size = MPackFinishMessage(&writer);
+	if (!MPackSendData(nvim->stdin_write, data, size)) {
+		return;
+	}
+	mpack_tree_parse(tree_reader);
+	if (mpack_tree_error(tree_reader)) {
+		return;
+	}
+	result = MPackExtractMessageResult(tree_reader);
+
+	// Report the windows nvim scrolled for the scroll animation, before they are redrawn. A
+	// floating window covering a window's top or bottom, like treesitter-context's, isn't
+	// scrolled along, so it's left out. Rows are screen rows, counting wrapped lines.
+	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
+	MPackStartRequest(RegisterRequest(nvim, nvim_command), NVIM_REQUEST_NAMES[nvim_command], &writer);
+	mpack_start_array(&writer, 1);
+	mpack_write_cstr(&writer, R"(lua
+local api = vim.api
+api.nvim_create_autocmd('WinScrolled', { group = api.nvim_create_augroup('ndx_scroll', {}), callback = function()
+  local enabled = vim.g.ndx_scroll_animation
+  if not enabled or enabled == 0 then return end
+  local floats = {}
+  for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+    local config = api.nvim_win_get_config(win)
+    if config.relative ~= '' and not config.hide then
+      local position = api.nvim_win_get_position(win)
+      local border = type(config.border) == 'table' and #config.border > 0 and 2 or 0
+      floats[#floats + 1] = { position[1], position[1] + api.nvim_win_get_height(win) + border,
+        position[2], position[2] + api.nvim_win_get_width(win) + border }
+    end
+  end
+  local scrolls = {}
+  for id, change in pairs(vim.v.event) do
+    local win = tonumber(id)
+    if win and change.topline ~= 0 and api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
+      local info = vim.fn.getwininfo(win)[1]
+      local first = math.min(info.topline, info.topline - change.topline)
+      local last = math.max(info.topline, info.topline - change.topline) - 1
+      local ok, height = pcall(api.nvim_win_text_height, win, { start_row = first - 1, end_row = last - 1 })
+      local rows = ok and height.all or math.abs(change.topline)
+      if change.topline < 0 then rows = -rows end
+      local top = info.winrow - 1 + info.winbar
+      local bottom, left, right = top + info.height, info.wincol - 1, info.wincol - 1 + info.width
+      for _, float in ipairs(floats) do
+        if float[3] < right and left < float[4] and float[1] < bottom and top < float[2] then
+          if float[1] <= top then top = math.max(top, float[2])
+          elseif float[2] >= bottom then bottom = math.min(bottom, float[1]) end
+        end
+      end
+      if top < bottom then scrolls[#scrolls + 1] = { top, bottom, left, right, rows } end
+    end
+  end
+  if #scrolls > 0 then vim.rpcnotify(1, 'ndx_scroll', scrolls) end
+end })
+)");
 	mpack_finish_array(&writer);
 	size = MPackFinishMessage(&writer);
 	if (!MPackSendData(nvim->stdin_write, data, size)) {
@@ -616,9 +672,9 @@ void NvimSendCommand(Nvim *nvim, const char *command) {
 	MPackSendData(nvim->stdin_write, data, size);
 }
 
-// The watcher only reports changes, send the g:ndx_cursor_* variables set before it was added
-void NvimSendCursorOptions(Nvim *nvim) {
-	NvimSendCommand(nvim, "call map(filter(keys(g:), {_, k -> k =~# '^ndx_cursor_'}), "
+// The watcher only reports changes, send the g:ndx_* variables set before it was added
+void NvimSendOptions(Nvim *nvim) {
+	NvimSendCommand(nvim, "call map(filter(keys(g:), {_, k -> k =~# '^ndx_'}), "
 		"{_, k -> rpcnotify(1, 'ndx_option', k, g:[k])})");
 }
 

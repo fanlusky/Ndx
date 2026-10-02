@@ -42,6 +42,10 @@ struct PixelSize {
 struct CursorModeInfo {
 	CursorShape shape;
 	uint16_t hl_attrib_id;
+	// In ms, only used with the animations
+	int blinkwait;
+	int blinkon;
+	int blinkoff;
 };
 struct Cursor {
 	CursorModeInfo *mode_info;
@@ -102,6 +106,7 @@ constexpr float POINTS_PER_INCH = 72.0f;
 struct GlyphDrawingEffect;
 struct GlyphRenderer;
 struct CursorAnimation;
+struct ScrollAnimation;
 struct Renderer {
 	CursorModeInfo cursor_mode_infos[MAX_CURSOR_MODE_INFOS];
 	Vec<HighlightAttributes> hl_attribs;
@@ -109,18 +114,22 @@ struct Renderer {
 	bool in_insert_mode;
 	bool in_cmdline_mode;
 
-	// With the cursor animation, the grid is drawn into d2d_grid_bitmap and every
-	// frame is composed of it with the animated cursor and its particles on top
+	// With the cursor or scroll animation, the grid is drawn into d2d_grid_bitmap and every
+	// frame is composed of it, the scrolling regions and the animated cursor on top
 	CursorAnimation *cursor_animation;
-	bool cursor_animation_active;
+	ScrollAnimation *scroll_animation;
+	bool animation_active;
 	bool cursor_animating;
+	bool scroll_animating;
 	bool cursor_animation_was_in_cmdline;
-	LARGE_INTEGER cursor_animation_last_frame;
+	LARGE_INTEGER animation_last_frame;
 	LARGE_INTEGER performance_frequency;
 	ID2D1Bitmap1 *d2d_grid_bitmap;
 	bool window_focused;
-	// The frame latency waitable object has already been waited on for the next frame
-	bool swapchain_wait_done;
+	// Signaled when the next animation frame is due
+	HANDLE animation_timer;
+	// Drawing the frame scheduled by animation_timer
+	bool drawing_animation_frame;
 
 	GlyphRenderer *glyph_renderer;
 
@@ -209,13 +218,21 @@ void RendererSetComposition(Renderer *renderer, const wchar_t *text, uint32_t le
 // Client rect of [start, end) of a composition string as it would be drawn at the cursor
 RECT RendererGetCompositionTextRect(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t start, uint32_t end);
 
-// Applies a g:ndx_cursor_<name> variable, see CursorAnimationSetOption
-void RendererSetCursorOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value);
+// Applies a g:ndx_cursor_* or g:ndx_scroll_* variable, see CursorAnimationSetOption
+// and ScrollAnimationSetOption
+void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value);
 void RendererSetFocus(Renderer *renderer, bool focused);
-// Whether the cursor animation needs more frames, drawn with RendererAnimate
-// once swapchain_wait_handle is signaled
+// Starts scrolling the windows nvim reports with an ndx_scroll notification, before it redraws
+// them. Each scroll is [top, bottom, left, right, rows], rows being positive when scrolling down.
+void RendererScrollWindows(Renderer *renderer, mpack_node_t scrolls);
+// Whether the animations need more frames. They are drawn with RendererAnimate
+// once the handle returned by RendererScheduleAnimationFrame is signaled.
 bool RendererIsAnimating(Renderer *renderer);
+HANDLE RendererScheduleAnimationFrame(Renderer *renderer);
 void RendererAnimate(Renderer *renderer);
+// Milliseconds until the cursor blinks next and has to be drawn with
+// RendererFlush, INFINITE if it doesn't blink
+DWORD RendererGetBlinkTimeout(Renderer *renderer);
 
 PixelSize RendererGridToPixelSize(Renderer *renderer, int rows, int cols);
 GridSize RendererPixelsToGridSize(Renderer *renderer, int width, int height);

@@ -11,8 +11,8 @@ Changes compared to Nvy:
   instead of IMM32, see [Input Method (TSF)](#input-method-tsf)
 - `guifont` accepts a comma separated list of fonts, the extra fonts are used for glyphs missing from
   the main font (e.g. Nerd Font icons, CJK characters)
-- Optional [neovide](https://github.com/neovide/neovide) style cursor animation and particle effects, see
-  [Cursor Animation](#cursor-animation)
+- Optional [neovide](https://github.com/neovide/neovide) style animations: an animated cursor with particle effects,
+  smooth scrolling and a fading cursor blink, see [Animations](#animations)
 - The default window is 2/3 as wide
 - The executable is `Ndx.exe` and the global vim variable is `g:ndx` (instead of `g:nvy`)
 
@@ -54,22 +54,23 @@ Ndx can be started with the following flags:
 - You can drag files onto Ndx to open them (:e)
 - Dragging files while holding Ctrl opens them in a new window (:new)
 
-## Cursor Animation
+## Animations
 
-Ndx can animate the cursor and draw particle effects behind it like neovide, rendered with Direct2D. It is
-off by default and turned on with a global variable, which can be changed at any time:
+Ndx can animate the cursor, draw particle effects behind it and scroll smoothly like neovide, rendered with
+Direct2D. The animations are off by default and turned on with global variables, which can be changed at any time:
 
 ```lua
 vim.g.ndx_cursor_animation = true
 vim.g.ndx_cursor_vfx_mode = "railgun" -- or a list, e.g. { "railgun", "sonicboom" }
+vim.g.ndx_scroll_animation = true
 ```
 
-The cursor settings are the ones of neovide with an `ndx_` prefix instead of `neovide_`, unsetting a variable
-restores its default:
+The settings are the ones of neovide with an `ndx_` prefix instead of `neovide_`, unsetting a variable restores
+its default:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `g:ndx_cursor_animation` | `v:false` | Turns the animation and the effects on |
+| `g:ndx_cursor_animation` | `v:false` | Turns the cursor animation and the effects on |
 | `g:ndx_cursor_animation_length` | `0.15` | Time in seconds the cursor takes to reach its destination |
 | `g:ndx_cursor_short_animation_length` | `0.04` | Same for moves of up to two characters, e.g. while typing |
 | `g:ndx_cursor_trail_size` | `1.0` | How much the back of the cursor lags behind, from `0.0` to `1.0` |
@@ -77,6 +78,7 @@ restores its default:
 | `g:ndx_cursor_animate_command_line` | `v:true` | Animate the cursor going to and from the command line |
 | `g:ndx_cursor_antialiasing` | `v:true` | Antialias the edges of the cursor |
 | `g:ndx_cursor_unfocused_outline_width` | `0.125` | Width of the outline drawn while unfocused, relative to the font size |
+| `g:ndx_cursor_smooth_blink` | `v:false` | Fade the cursor in and out when it blinks |
 | `g:ndx_cursor_vfx_mode` | `""` | `railgun`, `torpedo`, `pixiedust`, `sonicboom`, `ripple` or `wireframe`, or a list of them |
 | `g:ndx_cursor_vfx_opacity` | `200.0` | Opacity of the particles, from `0` to `255` |
 | `g:ndx_cursor_vfx_particle_lifetime` | `0.5` | Seconds a trail particle lives |
@@ -85,10 +87,20 @@ restores its default:
 | `g:ndx_cursor_vfx_particle_speed` | `10.0` | Speed of the trail particles |
 | `g:ndx_cursor_vfx_particle_phase` | `1.5` | Wave length of the `railgun` particles |
 | `g:ndx_cursor_vfx_particle_curl` | `1.0` | How much the trail particles curl |
+| `g:ndx_scroll_animation` | `v:false` | Turns smooth scrolling on |
+| `g:ndx_scroll_animation_length` | `0.3` | Time in seconds a scroll takes |
+| `g:ndx_scroll_animation_far_lines` | `1` | Rows a jump further than the window, e.g. `gg` or `G`, is animated by |
 
-While animating, frames are drawn at the display refresh rate. Once the cursor and the particles have settled,
-Ndx goes back to only drawing when Neovim updates the screen.
+With either animation turned on, the cursor also blinks as set with `blinkwait`, `blinkon` and `blinkoff` in
+`'guicursor'`, which Ndx otherwise ignores.
 
+Smooth scrolling animates every scroll of a window reported by Neovim's `WinScrolled` event, e.g. `j`/`k` at the
+window's edge, `<C-e>`, `<C-d>`, `zz` or the mouse wheel. Floating windows covering a window's top or bottom, like
+treesitter-context's, stay in place. Unlike neovide, Ndx doesn't use Neovim's multigrid UI, so moving floating
+windows aren't animated.
+
+While animating, frames are drawn at the display refresh rate. Once everything has settled, Ndx goes back to only
+drawing when Neovim updates the screen.
 ## Input Method (TSF)
 
 Ndx is a TSF-aware application, input methods (e.g. Microsoft Pinyin, Japanese IME) talk to it through TSF:

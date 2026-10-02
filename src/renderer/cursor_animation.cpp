@@ -12,6 +12,7 @@ constexpr CursorAnimationSettings DEFAULT_SETTINGS {
 	.animate_command_line = true,
 	.antialiasing = true,
 	.unfocused_outline_width = 1.0f / 8.0f,
+	.smooth_blink = false,
 	.vfx_modes = {},
 	.vfx_mode_count = 0,
 	.vfx_opacity = 200.0f,
@@ -117,6 +118,63 @@ void CursorAnimationInitialize(CursorAnimation *animation) {
 	animation->settings = DEFAULT_SETTINGS;
 	animation->vfx_count = 0;
 	animation->initialized = false;
+	animation->blink.initialized = false;
+}
+
+bool CursorBlinkIsStatic(const CursorBlinkTimes *times) {
+	// blinkwait may be 0, blinking starts right away then
+	return times->blinkon <= 0 || times->blinkoff <= 0;
+}
+
+double BlinkDelay(BlinkState state, const CursorBlinkTimes *times) {
+	switch (state) {
+	case BlinkState::Waiting: return times->blinkwait / 1000.0;
+	case BlinkState::On: return times->blinkon / 1000.0;
+	case BlinkState::Off: return times->blinkoff / 1000.0;
+	}
+	return 0.0;
+}
+
+void CursorBlinkUpdate(CursorBlink *blink, const CursorBlinkTimes *times, int row, int col, const void *mode_info, double now) {
+	if (!blink->initialized || blink->row != row || blink->col != col || blink->mode_info != mode_info) {
+		blink->initialized = true;
+		blink->row = row;
+		blink->col = col;
+		blink->mode_info = mode_info;
+		blink->state = times->blinkwait > 0 ? BlinkState::Waiting : BlinkState::On;
+		blink->transition_time = now + BlinkDelay(blink->state, times);
+	}
+
+	if (CursorBlinkIsStatic(times)) {
+		blink->state = BlinkState::Waiting;
+		return;
+	}
+
+	if (blink->transition_time <= now) {
+		blink->state = blink->state == BlinkState::On ? BlinkState::Off : BlinkState::On;
+		blink->transition_time += BlinkDelay(blink->state, times);
+		// In case we are lagging badly
+		if (blink->transition_time <= now) {
+			blink->transition_time = now + BlinkDelay(blink->state, times);
+		}
+	}
+}
+
+double CursorBlinkDeadline(const CursorBlink *blink, const CursorBlinkTimes *times) {
+	return blink->initialized && !CursorBlinkIsStatic(times) ? blink->transition_time : INFINITY;
+}
+
+bool CursorBlinkVisible(const CursorBlink *blink) {
+	return blink->state != BlinkState::Off;
+}
+
+float CursorBlinkOpacity(const CursorBlink *blink, const CursorBlinkTimes *times, double now) {
+	if (blink->state == BlinkState::Waiting) return 1.0f;
+
+	double total = BlinkDelay(blink->state, times);
+	float remaining = total > 0.0 ? static_cast<float>((blink->transition_time - now) / total) : 0.0f;
+	remaining = max(0.0f, min(remaining, 1.0f));
+	return blink->state == BlinkState::On ? remaining : 1.0f - remaining;
 }
 
 void CursorAnimationReset(CursorAnimation *animation) {
@@ -217,6 +275,9 @@ bool CursorAnimationSetOption(CursorAnimation *animation, const char *name, size
 	}
 	else if (Matches("unfocused_outline_width")) {
 		settings->unfocused_outline_width = max(0.0f, NodeToFloat(value, DEFAULT_SETTINGS.unfocused_outline_width));
+	}
+	else if (Matches("smooth_blink")) {
+		settings->smooth_blink = NodeToBool(value, DEFAULT_SETTINGS.smooth_blink);
 	}
 	else if (Matches("vfx_mode")) {
 		ParseVfxModes(settings, value);
@@ -458,6 +519,19 @@ bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarg
 	float center_y = target->y + target->height * 0.5f;
 
 	bool immediate = target->immediate;
+
+	// Move along with the scrolling text, so scrolling isn't taken for a jump
+	if (target->scroll_delta_y != 0.0f && animation->initialized) {
+		animation->destination_y += target->scroll_delta_y;
+		for (int i = 0; i < 4; ++i) {
+			animation->corners[i].y += target->scroll_delta_y;
+			animation->corners[i].previous_destination_y += target->scroll_delta_y;
+		}
+		for (int i = 0; i < animation->vfx_count; ++i) {
+			animation->vfxs[i].previous_destination_y += target->scroll_delta_y;
+		}
+	}
+
 	bool jumped = target->x != animation->destination_x || target->y != animation->destination_y;
 	animation->destination_x = target->x;
 	animation->destination_y = target->y;
@@ -519,6 +593,9 @@ bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarg
 	for (int i = 0; i < 4; ++i) {
 		animating |= CornerUpdate(&animation->corners[i], target, center_x, center_y, dt, immediate);
 	}
+
+	// The cursor only follows the scrolling text without the cursor animation
+	if (!settings->enabled) return animating;
 
 	for (int i = 0; i < animation->vfx_count; ++i) {
 		CursorVfx *vfx = &animation->vfxs[i];
