@@ -99,6 +99,8 @@ window's edge, `<C-e>`, `<C-d>`, `zz` or the mouse wheel. Floating windows cover
 treesitter-context's, stay in place. Unlike neovide, Ndx doesn't use Neovim's multigrid UI, so moving floating
 windows aren't animated.
 
+Wrapped lines, including partially visible lines with `'smoothscroll'`, are animated by their screen-row displacement.
+
 While animating, frames are drawn at the display refresh rate. Once everything has settled, Ndx goes back to only
 drawing when Neovim updates the screen.
 ## Input Method (TSF)
