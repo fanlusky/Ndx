@@ -54,6 +54,22 @@ struct CellProperty {
 	bool is_wide_char;
 };
 
+// Open addressing hash map from a grid cell to its measured text width
+struct CharWidthEntry {
+	uint64_t key;
+	float width;
+};
+struct CharWidthCache {
+	CharWidthEntry *entries;
+	uint32_t capacity;
+	uint32_t count;
+};
+enum class GlyphState : uint8_t {
+	Unknown,
+	Present,
+	Missing
+};
+
 enum class CompositionLineStyle : uint8_t {
 	None,
 	Solid,
@@ -130,6 +146,10 @@ struct Renderer {
 	float font_ascent;
     float font_descent;
 
+	// Measuring characters is expensive, so the results are kept until the font changes
+	CharWidthCache char_widths;
+	GlyphState latin1_glyphs[256];
+
 	D2D1_SIZE_U pixel_size;
 	bool grid_initialized;
 	int grid_rows;
@@ -138,6 +158,8 @@ struct Renderer {
 	wchar_t *wchar_buffer;
 	size_t wchar_buffer_length;
 	CellProperty *grid_cell_properties;
+	// Lines are only laid out on flush, so a line changed several times is drawn once
+	bool *dirty_rows;
 
 	wchar_t *composition_text;
 	uint32_t composition_length;

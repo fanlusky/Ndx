@@ -2,27 +2,28 @@
 
 enum NvimRequest : uint8_t {
 	vim_get_api_info = 0,
-	nvim_input = 1,
-	nvim_input_mouse = 2,
-	nvim_command = 3,
-	nvim_get_option_value = 4
+	nvim_command = 1,
+	nvim_get_option_value = 2
 };
 constexpr const char *NVIM_REQUEST_NAMES[] {
 	"nvim_get_api_info",
-	"nvim_input",
-	"nvim_input_mouse",
 	"nvim_command",
 	"nvim_get_option_value"
 };
+// Input is sent as notifications, nvim doesn't have to answer every key press
 enum NvimOutboundNotification : uint8_t {
 	nvim_ui_attach = 0,
 	nvim_ui_try_resize = 1,
-	nvim_set_var = 2
+	nvim_set_var = 2,
+	nvim_input = 3,
+	nvim_input_mouse = 4
 };
 constexpr const char *NVIM_OUTBOUND_NOTIFICATION_NAMES[] {
 	"nvim_ui_attach",
 	"nvim_ui_try_resize",
-	"nvim_set_var"
+	"nvim_set_var",
+	"nvim_input",
+	"nvim_input_mouse"
 };
 enum class MouseButton {
 	Left,

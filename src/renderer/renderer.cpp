@@ -245,12 +245,15 @@ void RendererShutdown(Renderer *renderer) {
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
 	SafeRelease(&renderer->dwrite_font_fallback);
+	SafeRelease(&renderer->font_face);
 	delete renderer->glyph_renderer;
 
 	free(renderer->grid_chars);
 	free(renderer->wchar_buffer);
 	free(renderer->grid_cell_properties);
+	free(renderer->dirty_rows);
 	free(renderer->composition_text);
+	free(renderer->char_widths.entries);
 }
 
 void RendererResize(Renderer *renderer, uint32_t width, uint32_t height) {
@@ -301,6 +304,81 @@ float GetTextWidth(Renderer *renderer, uint32_t *text, uint32_t length) {
 	return metrics.width;
 }
 
+constexpr uint64_t CHAR_WIDTH_EMPTY_KEY = UINT64_MAX;
+constexpr uint32_t CHAR_WIDTH_INITIAL_CAPACITY = 1024;
+
+void ResetCharWidths(Renderer *renderer) {
+	CharWidthCache *cache = &renderer->char_widths;
+	for (uint32_t i = 0; i < cache->capacity; ++i) {
+		cache->entries[i].key = CHAR_WIDTH_EMPTY_KEY;
+	}
+	cache->count = 0;
+	memset(renderer->latin1_glyphs, 0, sizeof(renderer->latin1_glyphs));
+}
+
+CharWidthEntry *FindCharWidthEntry(CharWidthCache *cache, uint64_t key) {
+	// Fibonacci hashing, the capacity is always a power of two
+	uint32_t mask = cache->capacity - 1;
+	uint32_t i = static_cast<uint32_t>((key * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+	while (cache->entries[i].key != key && cache->entries[i].key != CHAR_WIDTH_EMPTY_KEY) {
+		i = (i + 1) & mask;
+	}
+	return &cache->entries[i];
+}
+
+void GrowCharWidths(CharWidthCache *cache) {
+	CharWidthEntry *old_entries = cache->entries;
+	uint32_t old_capacity = cache->capacity;
+
+	cache->capacity = old_capacity ? old_capacity * 2 : CHAR_WIDTH_INITIAL_CAPACITY;
+	cache->entries = static_cast<CharWidthEntry *>(malloc(cache->capacity * sizeof(CharWidthEntry)));
+	for (uint32_t i = 0; i < cache->capacity; ++i) {
+		cache->entries[i].key = CHAR_WIDTH_EMPTY_KEY;
+	}
+	for (uint32_t i = 0; i < old_capacity; ++i) {
+		if (old_entries[i].key != CHAR_WIDTH_EMPTY_KEY) {
+			*FindCharWidthEntry(cache, old_entries[i].key) = old_entries[i];
+		}
+	}
+	free(old_entries);
+}
+
+// Width of the text in a grid cell, a wide char is measured together with the
+// cell holding its right half. Creating a text layout for every character of
+// every redrawn line is slow, so widths are cached until the font changes.
+float GetCellTextWidth(Renderer *renderer, uint32_t *cell, bool is_wide_char) {
+	uint32_t length = is_wide_char ? 2 : 1;
+	// The right half of a wide char is normally empty, only that case is cached
+	if (is_wide_char && cell[1] != 0) {
+		return GetTextWidth(renderer, cell, length);
+	}
+
+	CharWidthCache *cache = &renderer->char_widths;
+	if ((cache->count + 1) * 2 > cache->capacity) {
+		GrowCharWidths(cache);
+	}
+
+	uint64_t key = static_cast<uint64_t>(cell[0]) | (is_wide_char ? (1ull << 32) : 0);
+	CharWidthEntry *entry = FindCharWidthEntry(cache, key);
+	if (entry->key == CHAR_WIDTH_EMPTY_KEY) {
+		entry->key = key;
+		entry->width = GetTextWidth(renderer, cell, length);
+		++cache->count;
+	}
+	return entry->width;
+}
+
+bool IsGlyphMissing(Renderer *renderer, uint32_t codepoint) {
+	assert(codepoint < ARRAYSIZE(renderer->latin1_glyphs));
+	GlyphState *state = &renderer->latin1_glyphs[codepoint];
+	if (*state == GlyphState::Unknown) {
+		uint16_t glyph_index;
+		WIN_CHECK(renderer->font_face->GetGlyphIndicesW(&codepoint, 1, &glyph_index));
+		*state = glyph_index == 0 ? GlyphState::Missing : GlyphState::Present;
+	}
+	return *state == GlyphState::Missing;
+}
+
 bool UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_string, int strlen) {
 	font_size = max(5.0f, min(font_size, 150.0f));
 	renderer->last_requested_font_size = font_size;
@@ -338,7 +416,9 @@ bool UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
 
 	IDWriteFontFace *font_face;
 	WIN_CHECK(write_font->CreateFontFace(&font_face));
+	SafeRelease(&renderer->font_face);
 	WIN_CHECK(font_face->QueryInterface<IDWriteFontFace1>(&renderer->font_face));
+	ResetCharWidths(renderer);
 
 	renderer->font_face->GetMetrics(&renderer->font_metrics);
 
@@ -412,6 +492,7 @@ bool UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
 
 	SafeRelease(&font_face);
 	SafeRelease(&font_face_bold);
+	SafeRelease(&font_size_scale_bold1);
 	SafeRelease(&write_font);
 	SafeRelease(&write_font_bold);
 
@@ -614,17 +695,17 @@ void DrawGridLine(Renderer *renderer, int row) {
 		i_wchars += ContainsSurrogatePair(renderer->grid_chars[base + i]) ? 2 : 1, ++i) {
 
 		// Add spacing for wide chars
-		if (renderer->grid_cell_properties[base + i].is_wide_char) {
-			float char_width = GetTextWidth(renderer, &renderer->grid_chars[base + i], 2);
+		if (renderer->grid_cell_properties[base + i].is_wide_char && i + 1 < renderer->grid_cols) {
+			float char_width = GetCellTextWidth(renderer, &renderer->grid_chars[base + i], true);
 			DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i_wchars), .length = 1 };
 			text_layout->SetCharacterSpacing(0, (renderer->font_width * 2) - char_width, 0, range);
 		}
 
-		// Add spacing for unicode chars. These characters are still single char width, 
-		// but some of them by default will take up a bit more or less, leading to issues. 
-		// So we realign them here.	
+		// Add spacing for unicode chars. These characters are still single char width,
+		// but some of them by default will take up a bit more or less, leading to issues.
+		// So we realign them here.
 		else if(renderer->grid_chars[base + i] > 0xFF) {
-			float char_width = GetTextWidth(renderer, &renderer->grid_chars[base + i], 1);
+			float char_width = GetCellTextWidth(renderer, &renderer->grid_chars[base + i], false);
 			if(abs(char_width - renderer->font_width) > 0.01f) {
 				DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i_wchars), .length = 1 };
 				text_layout->SetCharacterSpacing(0, renderer->font_width - char_width, 0, range);
@@ -632,12 +713,9 @@ void DrawGridLine(Renderer *renderer, int row) {
 		}
 		else {
 			// Add spacing for character not existing in this font
-			uint16_t glyph_index;
-			uint32_t code = static_cast<uint32_t>(renderer->grid_chars[base + i]);
-			WIN_CHECK(renderer->font_face->GetGlyphIndicesW(&code, 1, &glyph_index));
-			if (glyph_index == 0)
+			if (IsGlyphMissing(renderer, renderer->grid_chars[base + i]))
 			{
-				float char_width = GetTextWidth(renderer, &renderer->grid_chars[base + i], 1);
+				float char_width = GetCellTextWidth(renderer, &renderer->grid_chars[base + i], false);
 				float d_width = renderer->font_width - char_width;
 				if (d_width > 0)
 				{
@@ -684,10 +762,22 @@ void DrawGridLine(Renderer *renderer, int row) {
 	text_layout->Release();
 }
 
-void DrawAllGridLines(Renderer *renderer) {
-	for (size_t i = 0; i < renderer->grid_rows; ++i) {
-		DrawGridLine(renderer, i);
+void MarkRowDirty(Renderer *renderer, int row) {
+	if (renderer->dirty_rows && row >= 0 && row < renderer->grid_rows) {
+		renderer->dirty_rows[row] = true;
 	}
+}
+
+void DrawDirtyGridLines(Renderer *renderer) {
+	if (!renderer->dirty_rows) return;
+
+	for (int i = 0; i < renderer->grid_rows; ++i) {
+		if (renderer->draws_invalidated || renderer->dirty_rows[i]) {
+			renderer->dirty_rows[i] = false;
+			DrawGridLine(renderer, i);
+		}
+	}
+	renderer->draws_invalidated = false;
 }
 
 bool IsSurrogatePair(wchar_t left, wchar_t right) {
@@ -764,25 +854,27 @@ void DrawGridLines(Renderer *renderer, mpack_node_t grid_lines) {
 					renderer->grid_cell_properties[offset - 1].is_wide_char = false;
 				}
 
+				uint32_t grid_char;
+				wchar_t buffer[2];
+				int wstrlen = MultiByteToWideChar(CP_UTF8, 0, str, strlen, buffer, 2);
+				if (wstrlen == 2) {
+					// If the str takes two wchars, it must be a surrogate pair.
+					bool is_surrogate_pair = IsSurrogatePair(buffer[0], buffer[1]);
+					if (is_surrogate_pair) {
+						// Pack the surrogate pair into a single grid cell.
+						grid_char = (buffer[0] << 16) | buffer[1];
+					} else {
+						// This is an unsupported character (ie: a diacritic), draw a box here instead.
+						grid_char = 0x25a1;
+					}
+				} else {
+					grid_char = buffer[0];
+				}
+
 				// Wide character will never be repeated, so we don't have to
 				// handle wide character specially.
 				for (int k = 0; k < repeat; ++k) {
-					wchar_t buffer[2];
-					int wstrlen = MultiByteToWideChar(CP_UTF8, 0, str, strlen, buffer, 2);
-					if (wstrlen == 2) {
-						// If the str takes two wchars, it must be a surrogate pair.
-						bool is_surrogate_pair = IsSurrogatePair(buffer[0], buffer[1]);
-						if (is_surrogate_pair) {
-							// Pack the surrogate pair into a single grid cell.
-							renderer->grid_chars[offset] = (buffer[0] << 16) | buffer[1];
-						} else {
-							// This is an unsupported character (ie: a diacritic), draw a box here instead.
-							renderer->grid_chars[offset] = 0x25a1;
-						}
-					} else {
-						renderer->grid_chars[offset] = buffer[0];
-					}
-
+					renderer->grid_chars[offset] = grid_char;
 					renderer->grid_cell_properties[offset].hl_attrib_id = hl_attrib_id;
 
 					// Here we set is_wide_char to be always false. This is
@@ -797,7 +889,7 @@ void DrawGridLines(Renderer *renderer, mpack_node_t grid_lines) {
 			}
 		}
 
-		DrawGridLine(renderer, row);
+		MarkRowDirty(renderer, row);
 	}
 }
 
@@ -858,9 +950,13 @@ bool UpdateGridSize(Renderer *renderer, mpack_node_t grid_resize) {
 		for (int i = 0; i < grid_cols * grid_rows; ++i) {
 			renderer->grid_chars[i] = L' ';
 		}
+		free(renderer->grid_cell_properties);
 		renderer->grid_cell_properties = static_cast<CellProperty *>(calloc(static_cast<size_t>(grid_cols) * grid_rows, sizeof(CellProperty)));
 		free(renderer->wchar_buffer);
 		renderer->wchar_buffer = static_cast<wchar_t *>(malloc(static_cast<size_t>(grid_cols * 2) * sizeof(wchar_t)));
+		free(renderer->dirty_rows);
+		renderer->dirty_rows = static_cast<bool *>(calloc(grid_rows, sizeof(bool)));
+		renderer->draws_invalidated = true;
 
 		renderer->grid_initialized = true;
 		return true;
@@ -941,9 +1037,7 @@ void ClearComposition(Renderer *renderer) {
 	if (!renderer->composition_drawn) return;
 
 	renderer->composition_drawn = false;
-	if (renderer->composition_drawn_row < renderer->grid_rows) {
-		DrawGridLine(renderer, renderer->composition_drawn_row);
-	}
+	MarkRowDirty(renderer, renderer->composition_drawn_row);
 }
 
 void DrawComposition(Renderer *renderer) {
@@ -1219,15 +1313,12 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
 			// nvim since it can require multiple scrolls per frame, the latter
 			// I can't seem to make work with the FLIP_SEQUENTIAL swapchain model.
 			// Thus we fall back to drawing the appropriate scrolled grid lines
-			DrawGridLine(renderer, target_row);
+			MarkRowDirty(renderer, static_cast<int>(target_row));
 		}
 
 		// Redraw the line which the cursor has moved to, as it is no
 		// longer guaranteed that the cursor is still there
-		int cursor_row = renderer->cursor.row - rows;
-		if(cursor_row >= 0 && cursor_row < renderer->grid_rows) {
-			DrawGridLine(renderer, cursor_row);
-		}
+		MarkRowDirty(renderer, static_cast<int>(renderer->cursor.row - rows));
 	}
 }
 
@@ -1477,12 +1568,8 @@ void FinishDraw(Renderer *renderer) {
 
 void RendererFlush(Renderer* renderer) {
 	StartDraw(renderer);
-	if (renderer->draws_invalidated) {
-		renderer->draws_invalidated = false;
-		DrawAllGridLines(renderer);
-	}
-
 	ClearComposition(renderer);
+	DrawDirtyGridLines(renderer);
 	if (!renderer->ui_busy) {
 		DrawCursor(renderer);
 	}
@@ -1525,9 +1612,7 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 		else if (MPackMatchString(redraw_command_name, "grid_cursor_goto")) {
 			// If the old cursor position is still within the row bounds,
 			// redraw the line to get rid of the cursor
-			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
-			}
+			MarkRowDirty(renderer, renderer->cursor.row);
 			UpdateCursorPos(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "mode_info_set")) {
@@ -1535,9 +1620,7 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 		}
 		else if (MPackMatchString(redraw_command_name, "mode_change")) {
 			// Redraw cursor if its inside the bounds
-			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
-			}
+			MarkRowDirty(renderer, renderer->cursor.row);
 			UpdateCursorMode(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "set_title")) {
@@ -1546,9 +1629,7 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 		else if (MPackMatchString(redraw_command_name, "busy_start")) {
 			renderer->ui_busy = true;
 			// Hide cursor while UI is busy
-			if(renderer->cursor.row < renderer->grid_rows) {
-				DrawGridLine(renderer, renderer->cursor.row);
-			}
+			MarkRowDirty(renderer, renderer->cursor.row);
 		}
 		else if (MPackMatchString(redraw_command_name, "busy_stop")) {
 			renderer->ui_busy = false;
