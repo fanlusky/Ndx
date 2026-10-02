@@ -1,4 +1,16 @@
-# Nvy
+# Ndx
+
+Ndx is a fork of [Nvy](https://github.com/RMichelsen/Nvy) by Rasmus Ishøy Michelsen, a minimal
+[Neovim](https://neovim.io/) client for Windows written in C++. All credit for the original client goes to
+its author and contributors; it is distributed under the MIT license, see [LICENSE](LICENSE).
+
+The main difference from upstream is IME support: Ndx implements the
+[Text Services Framework (TSF)](https://learn.microsoft.com/en-us/windows/win32/tsf/text-services-framework)
+instead of IMM32, see [Input Method (TSF)](#input-method-tsf).
+
+The executable is still named `Nvy.exe` and all the configuration below is unchanged from Nvy.
+
+---
 
 Nvy is a minimal [Neovim](https://neovim.io/) client for Windows written in C++.
 It uses DirectWrite to shape and render the grid cells and text.\
@@ -34,9 +46,19 @@ Nvy can be started with the following flags:
 - You can drag files onto Nvy to open them (:e)
 - Dragging files while holding Ctrl opens them in a new window (:new)
 
+## Input Method (TSF)
+
+Ndx is a TSF-aware application, input methods (e.g. Microsoft Pinyin, Japanese IME) talk to it through TSF:
+
+- The composition string is drawn inline at the cursor, using the underline style (solid, dotted, dashed,
+  squiggle, bold) and colors declared by the input method's display attributes
+- The candidate window follows the cursor, including in the command line
+- Committed text is sent to Neovim as soon as the input method finalizes it
+- Clicking with the mouse commits the current composition first
+
 ## Releases
 
-Releases can be found [here](https://github.com/RMichelsen/Nvy/releases)
+Releases of the original Nvy can be found [here](https://github.com/RMichelsen/Nvy/releases)
 
 ## Build
 
@@ -48,11 +70,24 @@ Releases can be found [here](https://github.com/RMichelsen/Nvy/releases)
 Apart from the Windows SDK, the only dependency Nvy uses is the excellent [MPack](https://github.com/ludocode/mpack) library
 which is compiled alongside the client itself.
 
+### Build with the PowerShell script
+
+Requires Visual Studio with the C++ workload, [CMake](https://cmake.org/) and [Ninja](https://ninja-build.org/).
+The script sets up the MSVC x64 environment by itself.
+
+```powershell
+git clone https://github.com/fanlusky/Ndx.git
+cd Ndx
+.\scripts\build.ps1                    # Release -> build\release\Nvy.exe
+.\scripts\build.ps1 -Config Debug      # Debug   -> build\debug\Nvy.exe
+.\scripts\build.ps1 -Clean -Run        # Rebuild from scratch, then launch
+```
+
 ### Build example with [Ninja](https://ninja-build.org/)
 
 ```sh
-git clone https://github.com/RMichelsen/Nvy.git
-cd Nvy
+git clone https://github.com/fanlusky/Ndx.git
+cd Ndx
 mkdir build
 cd build
 cmake .. -GNinja
