@@ -12,6 +12,8 @@ void ScrollAnimationInitialize(ScrollAnimation *scroll) {
 	scroll->region_count = 0;
 	scroll->d2d_snapshot = nullptr;
 	scroll->d2d_snapshot_temp = nullptr;
+	scroll->pending_scroll_count = 0;
+	scroll->pending_grid_shift_count = 0;
 }
 
 bool ScrollAnimationSetOption(ScrollAnimation *scroll, const char *name, size_t length, mpack_node_t value) {
@@ -22,7 +24,9 @@ bool ScrollAnimationSetOption(ScrollAnimation *scroll, const char *name, size_t 
 
 	if (Matches("animation")) {
 		settings->enabled = NodeToBool(value, DEFAULT_SCROLL_SETTINGS.enabled);
-		ScrollAnimationReset(scroll);
+		// Queued grid shifts are still needed, the grid's rows were moved already
+		scroll->region_count = 0;
+		scroll->pending_scroll_count = 0;
 	}
 	else if (Matches("animation_length")) {
 		settings->animation_length = max(0.0f, NodeToFloat(value, DEFAULT_SCROLL_SETTINGS.animation_length));
@@ -38,6 +42,9 @@ bool ScrollAnimationSetOption(ScrollAnimation *scroll, const char *name, size_t 
 
 void ScrollAnimationReset(ScrollAnimation *scroll) {
 	scroll->region_count = 0;
+	scroll->pending_scroll_count = 0;
+	// The grid is cleared or drawn again from scratch
+	scroll->pending_grid_shift_count = 0;
 }
 
 void ScrollAnimationReleaseResources(ScrollAnimation *scroll) {
@@ -102,7 +109,7 @@ void DrawScrollRegion(Renderer *renderer, ScrollAnimation *scroll, const ScrollR
 	ID2D1DeviceContext4 *context = renderer->d2d_context;
 	D2D1_RECT_F rect = RegionRect(renderer, region);
 	float offset = roundf(region->spring.position * renderer->font_height);
-	float snapshot_offset = roundf((region->spring.position - region->snapshot_position) * renderer->font_height);
+	float snapshot_offset = offset - roundf(region->snapshot_position * renderer->font_height);
 
 	context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 	D2D1_POINT_2F grid_origin { .x = rect.left, .y = rect.top + offset };
@@ -137,8 +144,6 @@ bool SaveSnapshot(Renderer *renderer, ScrollAnimation *scroll, ScrollRegionAnima
 
 	D2D1_RECT_U pixel_rect = RegionPixelRect(renderer, region);
 	if (pixel_rect.right <= pixel_rect.left || pixel_rect.bottom <= pixel_rect.top) return false;
-	D2D1_POINT_2U origin { .x = pixel_rect.left, .y = pixel_rect.top };
-
 	ID2D1DeviceContext4 *context = renderer->d2d_context;
 	ID2D1Bitmap1 *source = renderer->d2d_grid_bitmap;
 	if (region->spring.position != 0.0f) {
@@ -154,9 +159,18 @@ bool SaveSnapshot(Renderer *renderer, ScrollAnimation *scroll, ScrollRegionAnima
 		source = scroll->d2d_snapshot_temp;
 	}
 
-	// Copies aren't part of the drawing batch, so draw everything up to here first
-	context->Flush();
-	return SUCCEEDED(scroll->d2d_snapshot->CopyFromBitmap(&origin, source, &pixel_rect));
+	ID2D1Image *target;
+	context->GetTarget(&target);
+	context->SetTarget(scroll->d2d_snapshot);
+	D2D1_RECT_F rect = RegionRect(renderer, region);
+	D2D1_POINT_2F origin { .x = rect.left, .y = rect.top };
+	context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
+	context->DrawImage(source, &origin, &rect,
+		D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
+	context->PopAxisAlignedClip();
+	context->SetTarget(target);
+	SafeRelease(&target);
+	return true;
 }
 
 void RemoveRegion(ScrollAnimation *scroll, int index) {
@@ -167,9 +181,8 @@ bool RegionsOverlap(const ScrollRegionAnimation *region, int top, int bottom, in
 	return region->left < right && left < region->right && region->top < bottom && top < region->bottom;
 }
 
-void ScrollAnimationOnScroll(Renderer *renderer, int top, int bottom, int left, int right, int rows) {
+void StartScroll(Renderer *renderer, int top, int bottom, int left, int right, int rows) {
 	ScrollAnimation *scroll = renderer->scroll_animation;
-	if (!renderer->animation_active || !scroll->settings.enabled || rows == 0 || bottom <= top || right <= left) return;
 
 	ScrollRegionAnimation *region = nullptr;
 	for (int i = 0; i < scroll->region_count; ++i) {
@@ -230,13 +243,44 @@ void ScrollAnimationOnScroll(Renderer *renderer, int top, int bottom, int left, 
 	region->spring.position = position;
 }
 
-bool ScrollAnimationShiftGrid(Renderer *renderer, int top, int bottom, int left, int right, int rows) {
+void ScrollAnimationQueueScroll(Renderer *renderer, GridScroll grid_scroll) {
 	ScrollAnimation *scroll = renderer->scroll_animation;
-	int kept_rows = bottom - top - abs(rows);
-	if (!renderer->d2d_grid_bitmap || kept_rows <= 0 || right <= left ||
+	if (!renderer->animation_active || !scroll->settings.enabled || grid_scroll.rows == 0 ||
+		grid_scroll.bottom <= grid_scroll.top || grid_scroll.right <= grid_scroll.left) {
+		return;
+	}
+
+	for (int i = 0; i < scroll->pending_scroll_count; ++i) {
+		GridScroll *pending = &scroll->pending_scrolls[i];
+		if (pending->top == grid_scroll.top && pending->bottom == grid_scroll.bottom &&
+			pending->left == grid_scroll.left && pending->right == grid_scroll.right) {
+			pending->rows += grid_scroll.rows;
+			return;
+		}
+	}
+	if (scroll->pending_scroll_count < MAX_SCROLL_REGIONS) {
+		scroll->pending_scrolls[scroll->pending_scroll_count++] = grid_scroll;
+	}
+}
+
+bool ScrollAnimationQueueGridShift(Renderer *renderer, GridScroll grid_scroll) {
+	ScrollAnimation *scroll = renderer->scroll_animation;
+	int kept_rows = grid_scroll.bottom - grid_scroll.top - abs(grid_scroll.rows);
+	if (!renderer->d2d_grid_bitmap || kept_rows <= 0 || grid_scroll.right <= grid_scroll.left ||
 		renderer->font_height != floorf(renderer->font_height) ||
-		!CreateSnapshotBitmap(renderer, &scroll->d2d_snapshot_temp)) {
+		scroll->pending_grid_shift_count == MAX_PENDING_GRID_SHIFTS) {
 		return false;
+	}
+	scroll->pending_grid_shifts[scroll->pending_grid_shift_count++] = grid_scroll;
+	return true;
+}
+
+void ShiftGrid(Renderer *renderer, int top, int bottom, int left, int right, int rows) {
+	ScrollAnimation *scroll = renderer->scroll_animation;
+	if (!CreateSnapshotBitmap(renderer, &scroll->d2d_snapshot_temp)) {
+		// The moved rows show what was there before until they're drawn again
+		renderer->draws_invalidated = true;
+		return;
 	}
 
 	// The rows staying in the region, scrolling down moves them up
@@ -266,7 +310,27 @@ bool ScrollAnimationShiftGrid(Renderer *renderer, int top, int bottom, int left,
 	context->DrawImage(scroll->d2d_snapshot_temp, &destination_origin, &source,
 		D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
 	context->PopAxisAlignedClip();
-	return true;
+}
+
+void ScrollAnimationApplyPending(Renderer *renderer, bool start_scrolls) {
+	ScrollAnimation *scroll = renderer->scroll_animation;
+
+	// The snapshots are taken from the grid as it was shown so far, before it is changed
+	if (start_scrolls) {
+		for (int i = 0; i < scroll->pending_scroll_count; ++i) {
+			const GridScroll *pending = &scroll->pending_scrolls[i];
+			if (pending->rows != 0) {
+				StartScroll(renderer, pending->top, pending->bottom, pending->left, pending->right, pending->rows);
+			}
+		}
+		scroll->pending_scroll_count = 0;
+	}
+
+	for (int i = 0; i < scroll->pending_grid_shift_count; ++i) {
+		const GridScroll *shift = &scroll->pending_grid_shifts[i];
+		ShiftGrid(renderer, shift->top, shift->bottom, shift->left, shift->right, shift->rows);
+	}
+	scroll->pending_grid_shift_count = 0;
 }
 
 void ScrollAnimationOnFlush(ScrollAnimation *scroll) {

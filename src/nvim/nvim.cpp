@@ -207,13 +207,23 @@ api.nvim_create_autocmd('WinScrolled', { group = api.nvim_create_augroup('ndx_sc
   local scrolls = {}
   for id, change in pairs(vim.v.event) do
     local win = tonumber(id)
-    if win and change.topline ~= 0 and api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
+    if win and (change.topline ~= 0 or change.skipcol ~= 0 or change.topfill ~= 0)
+      and api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
       local info = vim.fn.getwininfo(win)[1]
-      local first = math.min(info.topline, info.topline - change.topline)
-      local last = math.max(info.topline, info.topline - change.topline) - 1
-      local ok, height = pcall(api.nvim_win_text_height, win, { start_row = first - 1, end_row = last - 1 })
-      local rows = ok and height.all or math.abs(change.topline)
-      if change.topline < 0 then rows = -rows end
+      local view = api.nvim_win_call(win, vim.fn.winsaveview)
+      local previous_top = view.topline - change.topline
+      local previous_skip = view.skipcol - change.skipcol
+      local first, first_skip, last, last_skip = previous_top, previous_skip, view.topline, view.skipcol
+      local direction = 1
+      if first > last or (first == last and first_skip > last_skip) then
+        first, first_skip, last, last_skip = last, last_skip, first, first_skip
+        direction = -1
+      end
+      local ok, height = pcall(api.nvim_win_text_height, win, {
+        start_row = first - 1, start_vcol = first_skip,
+        end_row = last - 1, end_vcol = last_skip,
+      })
+      local rows = (ok and direction * height.all or change.topline) - change.topfill
       local top = info.winrow - 1 + info.winbar
       local bottom, left, right = top + info.height, info.wincol - 1, info.wincol - 1 + info.width
       for _, float in ipairs(floats) do

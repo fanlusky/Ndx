@@ -181,6 +181,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	} return 0;
 	case WM_RENDERER_ANIMATE: {
 	} return 0;
+	case WM_RENDERER_VSYNC: {
+		RendererOnVsync(context->renderer);
+	} return 0;
 	case WM_RENDERER_FONT_UPDATE: {
 		auto [rows, cols] = RendererPixelsToGridSize(context->renderer,
 			context->renderer->pixel_size.width, context->renderer->pixel_size.height);
@@ -646,23 +649,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 	MSG msg;
 	uint32_t previous_width = 0, previous_height = 0;
 	while (true) {
-		if (RendererIsAnimating(&renderer) && !renderer.draw_active) {
-			// Draw the next animation frame once the display is ready for it, but handle messages meanwhile
-			HANDLE animation_timer = RendererScheduleAnimationFrame(&renderer);
-			DWORD wait_result = MsgWaitForMultipleObjectsEx(1, &animation_timer,
-				INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-			if (wait_result == WAIT_OBJECT_0) {
-				RendererAnimate(&renderer);
-				continue;
-			}
-			if (!PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
-				continue;
-			}
-			if (msg.message == WM_QUIT) {
-				break;
-			}
-		}
-		else if (DWORD blink_timeout = renderer.draw_active ? INFINITE : RendererGetBlinkTimeout(&renderer);
+		if (DWORD blink_timeout = renderer.draw_active ? INFINITE : RendererGetBlinkTimeout(&renderer);
 			blink_timeout != INFINITE) {
 			// Wake up to show or hide the blinking cursor
 			if (MsgWaitForMultipleObjectsEx(0, nullptr, blink_timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_TIMEOUT) {

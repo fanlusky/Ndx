@@ -3,6 +3,15 @@
 #include "renderer/glyph_renderer.h"
 #include "renderer/scroll_animation.h"
 
+void ResetLineLayouts(Renderer *renderer) {
+	for (LineLayoutEntry &entry : renderer->line_layouts) {
+		SafeRelease(&entry.layout);
+		free(entry.chars);
+		free(entry.properties);
+		entry = {};
+	}
+}
+
 void InitializeD2D(Renderer *renderer) {
 	D2D1_FACTORY_OPTIONS options {};
 #ifndef NDEBUG
@@ -121,6 +130,7 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 
 		WIN_CHECK(renderer->dxgi_swapchain->SetMaximumFrameLatency(1));
 		renderer->swapchain_wait_handle = renderer->dxgi_swapchain->GetFrameLatencyWaitableObject();
+		renderer->swapchain_frame_acquired = false;
 
 		SafeRelease(&dxgi_swapchain_temp);
 		SafeRelease(&dxgi_device);
@@ -150,6 +160,7 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 }
 
 void HandleDeviceLost(Renderer *renderer) {
+	ResetLineLayouts(renderer);
 	SafeRelease(&renderer->d3d_device);
 	SafeRelease(&renderer->d3d_context);
 	SafeRelease(&renderer->dxgi_swapchain);
@@ -228,11 +239,6 @@ void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, f
 	ScrollAnimationInitialize(renderer->scroll_animation);
 	renderer->window_focused = true;
 	QueryPerformanceFrequency(&renderer->performance_frequency);
-	renderer->animation_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-	if (!renderer->animation_timer) {
-		// Before Windows 10 1803
-		renderer->animation_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
-	}
 
 	InitializeLocale(renderer);
 
@@ -254,6 +260,16 @@ void RendererAttach(Renderer *renderer) {
 }
 
 void RendererShutdown(Renderer *renderer) {
+	ResetLineLayouts(renderer);
+	if (renderer->vsync_thread) {
+		renderer->vsync_thread_exit = true;
+		SetEvent(renderer->vsync_request_event);
+		// It may still be waiting for the swapchain, for at most a second
+		WaitForSingleObject(renderer->vsync_thread, 1500);
+		CloseHandle(renderer->vsync_thread);
+		CloseHandle(renderer->vsync_request_event);
+	}
+
 	SafeRelease(&renderer->d3d_device);
 	SafeRelease(&renderer->d3d_context);
 	SafeRelease(&renderer->dxgi_swapchain);
@@ -271,7 +287,6 @@ void RendererShutdown(Renderer *renderer) {
 	free(renderer->cursor_animation);
 	ScrollAnimationReleaseResources(renderer->scroll_animation);
 	free(renderer->scroll_animation);
-	CloseHandle(renderer->animation_timer);
 
 	free(renderer->grid_chars);
 	free(renderer->wchar_buffer);
@@ -528,6 +543,7 @@ bool UpdateFontMetrics(Renderer *renderer, float font_size, const char* font_str
 }
 
 bool RendererUpdateFont(Renderer *renderer, float font_size, const char *font_string, int strlen) {
+	ResetLineLayouts(renderer);
 	if (renderer->dwrite_text_format) {
 		renderer->dwrite_text_format->Release();
 	}
@@ -537,6 +553,7 @@ bool RendererUpdateFont(Renderer *renderer, float font_size, const char *font_st
 }
 
 void UpdateDefaultColors(Renderer *renderer, mpack_node_t default_colors) {
+	ResetLineLayouts(renderer);
 	size_t default_colors_arr_length = mpack_node_array_length(default_colors);
 
 	for (size_t i = 1; i < default_colors_arr_length; ++i) {
@@ -551,6 +568,7 @@ void UpdateDefaultColors(Renderer *renderer, mpack_node_t default_colors) {
 }
 
 void UpdateHighlightAttributes(Renderer *renderer, mpack_node_t highlight_attribs) {
+	ResetLineLayouts(renderer);
 	uint64_t attrib_count = mpack_node_array_length(highlight_attribs);
 	for (uint64_t i = 1; i < attrib_count; ++i) {
 		int64_t attrib_index = mpack_node_array_at(mpack_node_array_at(highlight_attribs, i), 0).data->value.i;
@@ -688,6 +706,34 @@ void DrawHighlightedText(Renderer *renderer, D2D1_RECT_F rect, uint32_t *text, u
 	renderer->d2d_context->PopAxisAlignedClip();
 }
 
+LineLayoutEntry *GetLineLayoutEntry(Renderer *renderer, int row) {
+	int columns = renderer->grid_cols;
+	uint32_t *chars = &renderer->grid_chars[row * columns];
+	CellProperty *properties = &renderer->grid_cell_properties[row * columns];
+	uint64_t key = 0xCBF29CE484222325ull;
+	for (int column = 0; column < columns; ++column) {
+		uint64_t cell = chars[column] |
+			(static_cast<uint64_t>(properties[column].hl_attrib_id) << 32) |
+			(static_cast<uint64_t>(properties[column].is_wide_char) << 48);
+		key = (key ^ cell) * 0x100000001B3ull;
+	}
+	LineLayoutEntry *entry = &renderer->line_layouts[(key ^ (key >> 32)) % MAX_LINE_LAYOUTS];
+	size_t chars_size = columns * sizeof(uint32_t);
+	size_t properties_size = columns * sizeof(CellProperty);
+	if (entry->layout && entry->key == key && entry->columns == columns &&
+		!memcmp(entry->chars, chars, chars_size) && !memcmp(entry->properties, properties, properties_size)) {
+		return entry;
+	}
+	SafeRelease(&entry->layout);
+	entry->chars = static_cast<uint32_t *>(realloc(entry->chars, chars_size));
+	entry->properties = static_cast<CellProperty *>(realloc(entry->properties, properties_size));
+	memcpy(entry->chars, chars, chars_size);
+	memcpy(entry->properties, properties, properties_size);
+	entry->columns = columns;
+	entry->key = key;
+	return entry;
+}
+
 void DrawGridLine(Renderer *renderer, int row) {
 	int base = row * renderer->grid_cols;
 
@@ -698,20 +744,25 @@ void DrawGridLine(Renderer *renderer, int row) {
 		.bottom = (row * renderer->font_height) + renderer->font_height
 	};
 
-	IDWriteTextLayout *temp_text_layout = nullptr;
-	ConvertToWide(renderer, &renderer->grid_chars[base], renderer->grid_cols);
-	WIN_CHECK(renderer->dwrite_factory->CreateTextLayout(
-		renderer->wchar_buffer,
-		renderer->wchar_buffer_length,
-		renderer->dwrite_text_format,
-		rect.right - rect.left,
-		rect.bottom - rect.top,
-		&temp_text_layout
-	));
-    size_t grid_chars_length = renderer->wchar_buffer_length;
-	IDWriteTextLayout1 *text_layout;
-	temp_text_layout->QueryInterface<IDWriteTextLayout1>(&text_layout);
-	temp_text_layout->Release();
+	LineLayoutEntry *entry = GetLineLayoutEntry(renderer, row);
+	bool layout_cached = entry->layout != nullptr;
+	if (!layout_cached) {
+		IDWriteTextLayout *temp_text_layout = nullptr;
+		ConvertToWide(renderer, &renderer->grid_chars[base], renderer->grid_cols);
+		WIN_CHECK(renderer->dwrite_factory->CreateTextLayout(
+			renderer->wchar_buffer,
+			renderer->wchar_buffer_length,
+			renderer->dwrite_text_format,
+			rect.right - rect.left,
+			rect.bottom - rect.top,
+			&temp_text_layout
+		));
+		entry->text_length = static_cast<uint32_t>(renderer->wchar_buffer_length);
+		WIN_CHECK(temp_text_layout->QueryInterface<IDWriteTextLayout1>(&entry->layout));
+		temp_text_layout->Release();
+	}
+	size_t grid_chars_length = entry->text_length;
+	IDWriteTextLayout1 *text_layout = entry->layout;
 
 	uint16_t hl_attrib_id = renderer->grid_cell_properties[base].hl_attrib_id;
 	int col_offset = 0;
@@ -720,7 +771,7 @@ void DrawGridLine(Renderer *renderer, int row) {
 		i_wchars += ContainsSurrogatePair(renderer->grid_chars[base + i]) ? 2 : 1, ++i) {
 
 		// Add spacing for wide chars
-		if (renderer->grid_cell_properties[base + i].is_wide_char && i + 1 < renderer->grid_cols) {
+		if (!layout_cached && renderer->grid_cell_properties[base + i].is_wide_char && i + 1 < renderer->grid_cols) {
 			float char_width = GetCellTextWidth(renderer, &renderer->grid_chars[base + i], true);
 			DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i_wchars), .length = 1 };
 			text_layout->SetCharacterSpacing(0, (renderer->font_width * 2) - char_width, 0, range);
@@ -729,14 +780,14 @@ void DrawGridLine(Renderer *renderer, int row) {
 		// Add spacing for unicode chars. These characters are still single char width,
 		// but some of them by default will take up a bit more or less, leading to issues.
 		// So we realign them here.
-		else if(renderer->grid_chars[base + i] > 0xFF) {
+		else if (!layout_cached && renderer->grid_chars[base + i] > 0xFF) {
 			float char_width = GetCellTextWidth(renderer, &renderer->grid_chars[base + i], false);
 			if(abs(char_width - renderer->font_width) > 0.01f) {
 				DWRITE_TEXT_RANGE range { .startPosition = static_cast<uint32_t>(i_wchars), .length = 1 };
 				text_layout->SetCharacterSpacing(0, renderer->font_width - char_width, 0, range);
 			}
 		}
-		else {
+		else if (!layout_cached) {
 			// Add spacing for character not existing in this font
 			if (IsGlyphMissing(renderer, renderer->grid_chars[base + i]))
 			{
@@ -760,7 +811,9 @@ void DrawGridLine(Renderer *renderer, int row) {
 				.bottom = (row * renderer->font_height) + renderer->font_height
 			};
 			DrawBackgroundRect(renderer, bg_rect, &renderer->hl_attribs[hl_attrib_id]);
-			ApplyHighlightAttributes(renderer, &renderer->hl_attribs[hl_attrib_id], text_layout, col_offset_wchars, i_wchars);
+			if (!layout_cached) {
+				ApplyHighlightAttributes(renderer, &renderer->hl_attribs[hl_attrib_id], text_layout, col_offset_wchars, i_wchars);
+			}
 
 			hl_attrib_id = renderer->grid_cell_properties[base + i].hl_attrib_id;
 			col_offset = i;
@@ -773,10 +826,12 @@ void DrawGridLine(Renderer *renderer, int row) {
 	D2D1_RECT_F last_rect = rect;
 	last_rect.left = col_offset * renderer->font_width;
 	DrawBackgroundRect(renderer, last_rect, &renderer->hl_attribs[hl_attrib_id]);
-	ApplyHighlightAttributes(renderer, &renderer->hl_attribs[hl_attrib_id], text_layout, col_offset_wchars, grid_chars_length);
+	if (!layout_cached) {
+		ApplyHighlightAttributes(renderer, &renderer->hl_attribs[hl_attrib_id], text_layout, col_offset_wchars, grid_chars_length);
+	}
 
 	renderer->d2d_context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
-	if(renderer->disable_ligatures) {
+	if (!layout_cached && renderer->disable_ligatures) {
 		text_layout->SetTypography(renderer->dwrite_typography, DWRITE_TEXT_RANGE { 
 			.startPosition = 0, 
 			.length = static_cast<uint32_t>(grid_chars_length)
@@ -784,7 +839,6 @@ void DrawGridLine(Renderer *renderer, int row) {
 	}
 	text_layout->Draw(renderer, renderer->glyph_renderer, 0.0f, rect.top);
 	renderer->d2d_context->PopAxisAlignedClip();
-	text_layout->Release();
 }
 
 void MarkRowDirty(Renderer *renderer, int row) {
@@ -1516,8 +1570,13 @@ void ScrollRegion(Renderer *renderer, mpack_node_t scroll_region) {
 		// With the animations the grid is drawn into a bitmap of our own, where the drawn
 		// rows can simply be moved. Then only rows with pending changes are drawn again.
 		bool grid_shifted = renderer->animation_active && !renderer->draws_invalidated && renderer->dirty_rows &&
-			ScrollAnimationShiftGrid(renderer, static_cast<int>(top), static_cast<int>(bottom),
-				static_cast<int>(left), static_cast<int>(right), static_cast<int>(rows));
+			ScrollAnimationQueueGridShift(renderer, GridScroll {
+				.top = static_cast<int>(top),
+				.bottom = static_cast<int>(bottom),
+				.left = static_cast<int>(left),
+				.right = static_cast<int>(right),
+				.rows = static_cast<int>(rows)
+			});
 
 		// This part is slightly cryptic, basically we're just
 		// iterating from top to bottom or vice versa depending on scroll direction.
@@ -1824,21 +1883,24 @@ void CreateGridBitmap(Renderer *renderer) {
 }
 
 // Waits until the swapchain is ready for the next frame, must be followed by a Present
-void WaitForSwapchain(Renderer *renderer) {
-	WaitForSingleObjectEx(
-		renderer->swapchain_wait_handle,
-		1000,
-		true
-	);
+void AcquireSwapchainFrame(Renderer *renderer) {
+	if (!renderer->swapchain_frame_acquired) {
+		WaitForSingleObjectEx(
+			renderer->swapchain_wait_handle,
+			1000,
+			true
+		);
+		renderer->swapchain_frame_acquired = true;
+	}
 }
 
 void StartDraw(Renderer *renderer) {
 	if (!renderer->draw_active) {
 		UpdateAnimationActive(renderer);
-		// With the animations, only drawing the frame from the grid has to wait for the
-		// swapchain, nvim's changes are drawn into the grid bitmap meanwhile
+		// With the animations, frames are drawn once the vsync thread found the swapchain
+		// ready, nvim's changes are drawn into the grid bitmap meanwhile
 		if (!renderer->animation_active) {
-			WaitForSwapchain(renderer);
+			AcquireSwapchainFrame(renderer);
 		}
 
 		if (renderer->animation_active && !renderer->d2d_grid_bitmap) {
@@ -1864,24 +1926,57 @@ void CopyFrontToBack(Renderer *renderer) {
 	SafeRelease(&back);
 }
 
-// Seconds since the previous animation frame
-float NextAnimationTimeStep(Renderer *renderer) {
-	LARGE_INTEGER now;
-	QueryPerformanceCounter(&now);
-	float dt = static_cast<float>(now.QuadPart - renderer->animation_last_frame.QuadPart) /
-		static_cast<float>(renderer->performance_frequency.QuadPart);
-	renderer->animation_last_frame = now;
-
-	// After being idle, the time since the last frame says nothing about
-	// the frame rate, start the animation with a typical frame instead
-	bool animating = renderer->cursor_animating || renderer->scroll_animating;
-	return animating ? min(dt, 0.1f) : min(dt, 1.0f / 60.0f);
-}
-
 double NowInSeconds(Renderer *renderer) {
 	LARGE_INTEGER now;
 	QueryPerformanceCounter(&now);
 	return static_cast<double>(now.QuadPart) / static_cast<double>(renderer->performance_frequency.QuadPart);
+}
+
+// Refresh period of the monitor the window is on, in seconds
+double GetRefreshPeriod(Renderer *renderer) {
+	HMONITOR monitor = MonitorFromWindow(renderer->hwnd, MONITOR_DEFAULTTONEAREST);
+	if (monitor != renderer->refresh_monitor) {
+		renderer->refresh_monitor = monitor;
+		renderer->refresh_period = 1.0 / 60.0;
+
+		MONITORINFOEXW monitor_info {};
+		monitor_info.cbSize = sizeof(MONITORINFOEXW);
+		DEVMODEW display_mode {};
+		display_mode.dmSize = sizeof(DEVMODEW);
+		if (GetMonitorInfoW(monitor, &monitor_info) &&
+			EnumDisplaySettingsW(monitor_info.szDevice, ENUM_CURRENT_SETTINGS, &display_mode) &&
+			display_mode.dmDisplayFrequency > 1) {
+			renderer->refresh_period = 1.0 / display_mode.dmDisplayFrequency;
+		}
+	}
+	return renderer->refresh_period;
+}
+
+// The time the animations advance by in a frame. Like neovide, every frame is a refresh period
+// of the monitor, so the motion is even regardless of when exactly a frame is drawn. Frames
+// running behind catch up at once if a whole frame was missed, smaller drifts are corrected
+// over 10 frames, also when frames come faster than the monitor refreshes.
+float NextAnimationTimeStep(Renderer *renderer) {
+	double now = NowInSeconds(renderer);
+	if (!renderer->cursor_animating && !renderer->scroll_animating) {
+		// Starting from idle, the monitor or its refresh rate may have changed meanwhile
+		renderer->refresh_monitor = nullptr;
+		renderer->animation_start = now;
+		renderer->animation_time = 0.0;
+	}
+	double period = GetRefreshPeriod(renderer);
+
+	// Positive when the animations are behind the clock
+	double drift = now - renderer->animation_start - renderer->animation_time;
+	if (fabs(drift) > 1.0) {
+		renderer->animation_start = now;
+		renderer->animation_time = 0.0;
+		drift = 0.0;
+	}
+	double correction = drift >= period ? drift : drift / 10.0;
+	double dt = max(0.0, period + correction);
+	renderer->animation_time += dt;
+	return static_cast<float>(min(dt, 0.1));
 }
 
 CursorBlinkTimes GetCursorBlinkTimes(Renderer *renderer) {
@@ -1900,7 +1995,6 @@ void ComposeFrame(Renderer *renderer) {
 	context->DrawImage(renderer->d2d_grid_bitmap, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
 
 	float dt = NextAnimationTimeStep(renderer);
-	ScrollAnimationOnFlush(renderer->scroll_animation);
 	renderer->scroll_animating = ScrollAnimationUpdate(renderer->scroll_animation, dt, renderer->font_height);
 	ScrollAnimationDraw(renderer);
 
@@ -1961,23 +2055,39 @@ void ComposeFrame(Renderer *renderer) {
 	}
 }
 
+void RendererRequestFrame(Renderer *renderer);
+
 void FinishDraw(Renderer *renderer) {
 	if (renderer->animation_active) {
-		WaitForSwapchain(renderer);
 		ComposeFrame(renderer);
 	}
 	renderer->d2d_context->EndDraw();
 
-	// Animation frames are already paced to the display by RendererScheduleAnimationFrame, they mustn't
-	// tear. Waiting for the display with a sync interval would stall while the window isn't shown.
-	bool animating = renderer->animation_active && (renderer->cursor_animating || renderer->scroll_animating);
-	HRESULT hr = renderer->dxgi_swapchain->Present(0, animating ? 0 : DXGI_PRESENT_ALLOW_TEARING);
+	// With the animations, frames are paced by the vsync thread waiting for the swapchain. Like
+	// neovide, they're presented with a sync interval, then the swapchain is ready for the next
+	// frame right after the vertical blank. Without a sync interval it would be right away, so
+	// frames would be drawn far more often than shown, each showing the animations at a random
+	// time. While the window isn't shown, frames wouldn't be taken from a sync interval.
+	HRESULT hr;
+	if (renderer->animation_active) {
+		bool shown = !renderer->window_occluded && !IsIconic(renderer->hwnd) &&
+			MonitorFromWindow(renderer->hwnd, MONITOR_DEFAULTTONULL);
+		hr = renderer->dxgi_swapchain->Present(shown ? 1 : 0, 0);
+		renderer->window_occluded = hr == DXGI_STATUS_OCCLUDED;
+	}
+	else {
+		hr = renderer->dxgi_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+	}
 	renderer->draw_active = false;
+	renderer->swapchain_frame_acquired = false;
 
 	// The frame is composed from scratch with the animation, otherwise
 	// the next one is drawn on top of this one
 	if (!renderer->animation_active) {
 		CopyFrontToBack(renderer);
+	}
+	else if (renderer->cursor_animating || renderer->scroll_animating) {
+		RendererRequestFrame(renderer);
 	}
 
 	if (hr == DXGI_ERROR_DEVICE_REMOVED) {
@@ -1988,6 +2098,7 @@ void FinishDraw(Renderer *renderer) {
 void RendererFlush(Renderer* renderer) {
 	StartDraw(renderer);
 	ClearComposition(renderer);
+	ScrollAnimationApplyPending(renderer, renderer->flushing_nvim_redraw);
 	DrawDirtyGridLines(renderer);
 	// The animated cursor is drawn over the grid when composing the frame
 	if (!renderer->ui_busy && !renderer->animation_active) {
@@ -1995,61 +2106,61 @@ void RendererFlush(Renderer* renderer) {
 	}
 	DrawComposition(renderer);
 	DrawBorderRectangles(renderer);
+	ScrollAnimationOnFlush(renderer->scroll_animation);
 
-	// While animating, frames are drawn in step with the display. Presenting nvim's
-	// changes in between would show the animation at uneven times, so they are
-	// only drawn into the grid and shown with the next animation frame.
-	if (!renderer->drawing_animation_frame && RendererIsAnimating(renderer)) {
+	// With the animations, frames are only drawn once the swapchain is ready for them. Until
+	// then nvim's changes are only drawn into the grid, they are shown with the next frame.
+	if (renderer->animation_active && !renderer->swapchain_frame_acquired) {
 		renderer->d2d_context->EndDraw();
 		renderer->draw_active = false;
+		RendererRequestFrame(renderer);
 		return;
 	}
 	FinishDraw(renderer);
 }
 
-bool RendererIsAnimating(Renderer *renderer) {
-	return renderer->animation_active && (renderer->cursor_animating || renderer->scroll_animating) &&
-		renderer->dxgi_swapchain;
+// Like neovide's, waits for the swapchain to be ready for a frame on its own thread, so the UI
+// thread keeps handling input and nvim meanwhile. Frames are then drawn right after the vertical
+// blank of the monitor the window is on.
+DWORD WINAPI VsyncThread(LPVOID param) {
+	Renderer *renderer = static_cast<Renderer *>(param);
+	while (WaitForSingleObject(renderer->vsync_request_event, INFINITE) == WAIT_OBJECT_0 &&
+		!renderer->vsync_thread_exit) {
+		WaitForSingleObjectEx(renderer->swapchain_wait_handle, 1000, true);
+		PostMessage(renderer->hwnd, WM_RENDERER_VSYNC, 0, 0);
+	}
+	return 0;
 }
 
-HANDLE RendererScheduleAnimationFrame(Renderer *renderer) {
-	LARGE_INTEGER now;
-	QueryPerformanceCounter(&now);
-	int64_t period = renderer->performance_frequency.QuadPart / 60;
-	int64_t next_frame = now.QuadPart + period;
+void RendererRequestFrame(Renderer *renderer) {
+	if (renderer->frame_requested || renderer->swapchain_frame_acquired || !renderer->dxgi_swapchain) return;
 
-	// Draw right after the next vertical blank, so the frame is ready for the following one
-	DWM_TIMING_INFO timing_info { .cbSize = sizeof(DWM_TIMING_INFO) };
-	if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &timing_info)) && timing_info.qpcRefreshPeriod > 0) {
-		period = static_cast<int64_t>(timing_info.qpcRefreshPeriod);
-		// This is usually the upcoming vertical blank, rounding towards zero
-		// would then skip it and draw only every other refresh
-		int64_t since_vblank = now.QuadPart - static_cast<int64_t>(timing_info.qpcVBlank);
-		int64_t refreshes = since_vblank >= 0 ? since_vblank / period : -((-since_vblank + period - 1) / period);
-		next_frame = static_cast<int64_t>(timing_info.qpcVBlank) + (refreshes + 1) * period;
+	if (!renderer->vsync_thread) {
+		renderer->vsync_request_event = CreateEventW(nullptr, false, false, nullptr);
+		DWORD _;
+		renderer->vsync_thread = CreateThread(nullptr, 0, VsyncThread, renderer, 0, &_);
 	}
-	// At most one frame per refresh, e.g. when nvim just had one drawn
-	if (next_frame - renderer->animation_last_frame.QuadPart < period / 2) {
-		next_frame += period;
-	}
-
-	// Relative due times are negative, in 100ns units
-	LARGE_INTEGER due_time {
-		.QuadPart = -max(1ll, (next_frame - now.QuadPart) * 10'000'000 / renderer->performance_frequency.QuadPart)
-	};
-	SetWaitableTimer(renderer->animation_timer, &due_time, 0, nullptr, nullptr, false);
-	return renderer->animation_timer;
+	renderer->frame_requested = true;
+	SetEvent(renderer->vsync_request_event);
 }
 
-void RendererAnimate(Renderer *renderer) {
-	renderer->drawing_animation_frame = true;
-	RendererFlush(renderer);
-	renderer->drawing_animation_frame = false;
+void RendererOnVsync(Renderer *renderer) {
+	renderer->frame_requested = false;
+	renderer->swapchain_frame_acquired = true;
+
+	// In the middle of nvim's redraw the frame is drawn with its flush
+	if (!renderer->draw_active && renderer->grid_initialized) {
+		RendererFlush(renderer);
+	}
 }
 
 DWORD RendererGetBlinkTimeout(Renderer *renderer) {
 	CursorCell cell;
 	if (!renderer->animation_active || !renderer->dxgi_swapchain || !GetCursorCell(renderer, &cell)) {
+		return INFINITE;
+	}
+	// The blinking is updated with the frame which is on its way
+	if (renderer->frame_requested || renderer->swapchain_frame_acquired) {
 		return INFINITE;
 	}
 
@@ -2067,10 +2178,8 @@ void RendererScrollWindows(Renderer *renderer, mpack_node_t scrolls) {
 		return;
 	}
 
-	// The region's content is saved before nvim's redraw arrives. Unless nvim is in the
-	// middle of a redraw, the drawing for that ends here, nothing has to be presented.
-	bool was_drawing = renderer->draw_active;
-	StartDraw(renderer);
+	// nvim's redraw follows, the scroll starts with its flush. Frames drawn meanwhile keep
+	// showing the previous content where it was, instead of waiting for nvim.
 	size_t scroll_count = mpack_node_array_length(scrolls);
 	for (size_t i = 0; i < scroll_count; ++i) {
 		mpack_node_t scroll = mpack_node_array_at(scrolls, i);
@@ -2080,16 +2189,17 @@ void RendererScrollWindows(Renderer *renderer, mpack_node_t scrolls) {
 		for (int j = 0; j < 5; ++j) {
 			values[j] = static_cast<int>(NodeToFloat(mpack_node_array_at(scroll, j), 0.0f));
 		}
-		int top = max(values[0], 0);
-		int bottom = min(values[1], renderer->grid_rows);
-		int left = max(values[2], 0);
-		int right = min(values[3], renderer->grid_cols);
-		ScrollAnimationOnScroll(renderer, top, bottom, left, right, values[4]);
+		ScrollAnimationQueueScroll(renderer, GridScroll {
+			.top = max(values[0], 0),
+			.bottom = min(values[1], renderer->grid_rows),
+			.left = max(values[2], 0),
+			.right = min(values[3], renderer->grid_cols),
+			.rows = values[4]
+		});
 	}
-	if (!was_drawing) {
-		renderer->d2d_context->EndDraw();
-		renderer->draw_active = false;
-	}
+
+	// Wait for the swapchain while nvim redraws, so the frame is shown right with its flush
+	RendererRequestFrame(renderer);
 }
 
 bool HasPrefix(const char *name, size_t length, const char *prefix) {
@@ -2188,7 +2298,10 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 				renderer->has_drawn = true;
 				ShowWindow(renderer->hwnd, start_maximized ? SW_MAXIMIZE : SW_SHOWDEFAULT);			}
 
+			// The scrolls nvim reported start with the content they belong to
+			renderer->flushing_nvim_redraw = true;
 			RendererFlush(renderer);
+			renderer->flushing_nvim_redraw = false;
 		}
 	}
 }

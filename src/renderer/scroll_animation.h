@@ -34,12 +34,30 @@ struct ScrollAnimationSettings {
 	int far_lines;
 };
 
+// A scroll of a part of the grid, rows being positive when scrolling down
+struct GridScroll {
+	int top;
+	int bottom;
+	int left;
+	int right;
+	int rows;
+};
+
+constexpr int MAX_PENDING_GRID_SHIFTS = 64;
+
 struct ScrollAnimation {
 	ScrollAnimationSettings settings;
 	ScrollRegionAnimation regions[MAX_SCROLL_REGIONS];
 	int region_count;
 	ID2D1Bitmap1 *d2d_snapshot;
 	ID2D1Bitmap1 *d2d_snapshot_temp;
+
+	// Scrolls and grid shifts are applied on nvim's flush, together with the content they
+	// belong to. Until then frames keep showing the previous content where it was.
+	GridScroll pending_scrolls[MAX_SCROLL_REGIONS];
+	int pending_scroll_count;
+	GridScroll pending_grid_shifts[MAX_PENDING_GRID_SHIFTS];
+	int pending_grid_shift_count;
 };
 
 struct Renderer;
@@ -52,13 +70,16 @@ bool ScrollAnimationSetOption(ScrollAnimation *scroll, const char *name, size_t 
 void ScrollAnimationReset(ScrollAnimation *scroll);
 void ScrollAnimationReleaseResources(ScrollAnimation *scroll);
 
-// Called when nvim scrolled a window by a number of screen rows, before it is redrawn.
-// The region is the part of the window on the grid not covered by floating windows.
-void ScrollAnimationOnScroll(Renderer *renderer, int top, int bottom, int left, int right, int rows);
-// Moves the drawn rows of a scrolled region within the grid bitmap, so only the
-// rows the scroll uncovers have to be laid out again. Returns false if the
-// rows can't be moved by whole pixels, they have to be drawn again then.
-bool ScrollAnimationShiftGrid(Renderer *renderer, int top, int bottom, int left, int right, int rows);
+// Called when nvim scrolled a window by a number of screen rows, before it is redrawn. The
+// region is the part of the window on the grid not covered by floating windows.
+void ScrollAnimationQueueScroll(Renderer *renderer, GridScroll scroll);
+// Moves the drawn rows of a region nvim scrolled with grid_scroll within the grid bitmap on
+// the next flush, so only the rows the scroll uncovers have to be laid out again. Returns false
+// if the rows can't be moved by whole pixels, they have to be drawn again then.
+bool ScrollAnimationQueueGridShift(Renderer *renderer, GridScroll scroll);
+// Called before the dirty grid lines are drawn, moves the rows of the grid bitmap. The
+// queued scrolls are started on nvim's flush, when the content they belong to is drawn.
+void ScrollAnimationApplyPending(Renderer *renderer, bool start_scrolls);
 // Called after the dirty grid lines are drawn
 void ScrollAnimationOnFlush(ScrollAnimation *scroll);
 // Returns whether a region is still scrolling

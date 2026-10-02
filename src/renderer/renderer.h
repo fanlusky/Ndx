@@ -58,6 +58,16 @@ struct CellProperty {
 	bool is_wide_char;
 };
 
+constexpr int MAX_LINE_LAYOUTS = 256;
+struct LineLayoutEntry {
+	uint64_t key;
+	int columns;
+	uint32_t text_length;
+	uint32_t *chars;
+	CellProperty *properties;
+	IDWriteTextLayout1 *layout;
+};
+
 // Open addressing hash map from a grid cell to its measured text width
 struct CharWidthEntry {
 	uint64_t key;
@@ -122,14 +132,29 @@ struct Renderer {
 	bool cursor_animating;
 	bool scroll_animating;
 	bool cursor_animation_was_in_cmdline;
-	LARGE_INTEGER animation_last_frame;
 	LARGE_INTEGER performance_frequency;
 	ID2D1Bitmap1 *d2d_grid_bitmap;
 	bool window_focused;
-	// Signaled when the next animation frame is due
-	HANDLE animation_timer;
-	// Drawing the frame scheduled by animation_timer
-	bool drawing_animation_frame;
+
+	// Animations advance by a refresh period of the window's monitor per frame, animation_time
+	// is how far they advanced since animation_start, both in seconds
+	double animation_start;
+	double animation_time;
+	HMONITOR refresh_monitor;
+	double refresh_period;
+
+	// With the animations, the vsync thread waits for the swapchain to be ready for a frame
+	// and then posts WM_RENDERER_VSYNC, see RendererRequestFrame
+	HANDLE vsync_thread;
+	HANDLE vsync_request_event;
+	volatile bool vsync_thread_exit;
+	bool frame_requested;
+	// swapchain_wait_handle was waited on for a frame which isn't presented yet
+	bool swapchain_frame_acquired;
+	// The last frame wasn't shown, see FinishDraw
+	bool window_occluded;
+	// Drawing the changes of nvim's flush, as opposed to an animation frame
+	bool flushing_nvim_redraw;
 
 	GlyphRenderer *glyph_renderer;
 
@@ -174,6 +199,7 @@ struct Renderer {
 	// Measuring characters is expensive, so the results are kept until the font changes
 	CharWidthCache char_widths;
 	GlyphState latin1_glyphs[256];
+	LineLayoutEntry line_layouts[MAX_LINE_LAYOUTS];
 
 	D2D1_SIZE_U pixel_size;
 	bool grid_initialized;
@@ -225,11 +251,8 @@ void RendererSetFocus(Renderer *renderer, bool focused);
 // Starts scrolling the windows nvim reports with an ndx_scroll notification, before it redraws
 // them. Each scroll is [top, bottom, left, right, rows], rows being positive when scrolling down.
 void RendererScrollWindows(Renderer *renderer, mpack_node_t scrolls);
-// Whether the animations need more frames. They are drawn with RendererAnimate
-// once the handle returned by RendererScheduleAnimationFrame is signaled.
-bool RendererIsAnimating(Renderer *renderer);
-HANDLE RendererScheduleAnimationFrame(Renderer *renderer);
-void RendererAnimate(Renderer *renderer);
+// The vsync thread found the swapchain ready for the frame requested by RendererRequestFrame
+void RendererOnVsync(Renderer *renderer);
 // Milliseconds until the cursor blinks next and has to be drawn with
 // RendererFlush, INFINITE if it doesn't blink
 DWORD RendererGetBlinkTimeout(Renderer *renderer);
