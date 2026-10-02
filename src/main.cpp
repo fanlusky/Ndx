@@ -90,6 +90,14 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 				TsfNotifyLayoutChange(context->tsf);
 			}
 		}
+		else if (MPackMatchString(result.notification.name, "ndx_option")) {
+			// Sent by the g:ndx_cursor_* watcher, see NvimInitialize
+			mpack_node_t name = mpack_node_array_at(result.params, 0);
+			mpack_node_t value = mpack_node_array_at(result.params, 1);
+			if (mpack_node_type(name) == mpack_type_str) {
+				RendererSetCursorOption(context->renderer, mpack_node_str(name), mpack_node_strlen(name), value);
+			}
+		}
 	} break;
 	case MPackMessageType::Request: {
 		if (MPackMatchString(result.request.method, "vimenter")) {
@@ -97,6 +105,7 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 			// like additional startup settings or something else
 			NvimSendResponse(context->nvim, result.request.msg_id);
 			NvimGetOptionValue(context->nvim, "guifont");
+			NvimSendCursorOptions(context->nvim);
 		}
 	} break;
 	}
@@ -396,9 +405,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	} return 0;
 	case WM_SETFOCUS: {
 		NvimSetFocus(context->nvim);
+		RendererSetFocus(context->renderer, true);
 	} return 0;
 	case WM_KILLFOCUS: {
 		NvimKillFocus(context->nvim);
+		RendererSetFocus(context->renderer, false);
 	} return 0;
 	case WM_CLOSE: { 
 		NvimQuit(context->nvim);
@@ -622,7 +633,27 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 
 	MSG msg;
 	uint32_t previous_width = 0, previous_height = 0;
-	while (GetMessage(&msg, 0, 0, 0)) {
+	while (true) {
+		if (RendererIsAnimating(&renderer) && !renderer.draw_active) {
+			// Draw the next animation frame as soon as the swapchain is ready for it,
+			// which paces the animation to the display, but handle messages meanwhile
+			DWORD wait_result = MsgWaitForMultipleObjectsEx(1, &renderer.swapchain_wait_handle,
+				INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+			if (wait_result == WAIT_OBJECT_0) {
+				RendererAnimate(&renderer);
+				continue;
+			}
+			if (!PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
+				continue;
+			}
+			if (msg.message == WM_QUIT) {
+				break;
+			}
+		}
+		else if (GetMessage(&msg, 0, 0, 0) <= 0) {
+			break;
+		}
+
 		// TranslateMessage(&msg);
 		DispatchMessage(&msg);
 

@@ -13,6 +13,7 @@ set(Ndx_HEADERS
     "src/common/vec.h"
     "src/common/window_messages.h"
     "src/nvim/nvim.h"
+    "src/renderer/cursor_animation.h"
     "src/renderer/glyph_renderer.h"
     "src/renderer/renderer.h"
     "src/tsf/tsf.h"
@@ -22,6 +23,7 @@ set(Ndx_HEADERS
 set(Ndx_SOURCES
     "src/main.cpp"
     "src/nvim/nvim.cpp"
+    "src/renderer/cursor_animation.cpp"
     "src/renderer/glyph_renderer.cpp"
     "src/renderer/renderer.cpp"
     "src/tsf/tsf.cpp"

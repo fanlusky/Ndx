@@ -166,6 +166,23 @@ void NvimInitialize(Nvim *nvim, wchar_t *command_line, HWND hwnd) {
 	}
 	result = MPackExtractMessageResult(tree_reader); // get the result just in case...
 
+	// Forward changes of the g:ndx_cursor_* variables, which configure the cursor animation
+	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
+	MPackStartRequest(RegisterRequest(nvim, nvim_command), NVIM_REQUEST_NAMES[nvim_command], &writer);
+	mpack_start_array(&writer, 1);
+	mpack_write_cstr(&writer, "call dictwatcheradd(g:, 'ndx_cursor_*', "
+		"{d, k, z -> rpcnotify(1, 'ndx_option', k, get(z, 'new', v:null))})");
+	mpack_finish_array(&writer);
+	size = MPackFinishMessage(&writer);
+	if (!MPackSendData(nvim->stdin_write, data, size)) {
+		return;
+	}
+	mpack_tree_parse(tree_reader);
+	if (mpack_tree_error(tree_reader)) {
+		return;
+	}
+	result = MPackExtractMessageResult(tree_reader);
+
 	mpack_tree_destroy(tree_reader);
 	free(tree_reader);
 
@@ -597,6 +614,12 @@ void NvimSendCommand(Nvim *nvim, const char *command) {
 	mpack_finish_array(&writer);
 	size_t size = MPackFinishMessage(&writer);
 	MPackSendData(nvim->stdin_write, data, size);
+}
+
+// The watcher only reports changes, send the g:ndx_cursor_* variables set before it was added
+void NvimSendCursorOptions(Nvim *nvim) {
+	NvimSendCommand(nvim, "call map(filter(keys(g:), {_, k -> k =~# '^ndx_cursor_'}), "
+		"{_, k -> rpcnotify(1, 'ndx_option', k, g:[k])})");
 }
 
 void NvimSendResponse(Nvim *nvim, int64_t req_id) {
