@@ -1,0 +1,122 @@
+#pragma once
+
+// Animated cursor and cursor particle effects, modeled after neovide's cursor renderer.
+// This file only simulates the animation, drawing is done by the renderer.
+
+enum class CursorShape;
+
+enum class CursorVfxMode : uint8_t {
+	SonicBoom,
+	Ripple,
+	Wireframe,
+	Railgun,
+	Torpedo,
+	PixieDust
+};
+
+constexpr int MAX_CURSOR_VFX_MODES = 6;
+constexpr int MAX_CURSOR_PARTICLES = 1024;
+
+// Set from nvim through the g:ndx_cursor_* variables
+struct CursorAnimationSettings {
+	bool enabled;
+	float animation_length;
+	float short_animation_length;
+	float trail_size;
+	bool animate_in_insert_mode;
+	bool animate_command_line;
+	bool antialiasing;
+	float unfocused_outline_width;
+
+	CursorVfxMode vfx_modes[MAX_CURSOR_VFX_MODES];
+	int vfx_mode_count;
+	float vfx_opacity;
+	float vfx_particle_lifetime;
+	float vfx_particle_highlight_lifetime;
+	float vfx_particle_density;
+	float vfx_particle_speed;
+	float vfx_particle_phase;
+	float vfx_particle_curl;
+};
+
+// Critically damped spring, position is the remaining distance to the destination
+struct SpringAnimation {
+	float position;
+	float velocity;
+};
+
+struct CursorCorner {
+	float x;
+	float y;
+	// Position relative to the cursor center, in cursor cell sizes
+	float relative_x;
+	float relative_y;
+	float previous_destination_x;
+	float previous_destination_y;
+	SpringAnimation animation_x;
+	SpringAnimation animation_y;
+	float animation_length;
+};
+
+struct CursorParticle {
+	float x;
+	float y;
+	float speed_x;
+	float speed_y;
+	float rotation_speed;
+	float lifetime;
+	uint32_t color;
+};
+
+struct CursorVfx {
+	CursorVfxMode mode;
+
+	// Highlight modes
+	float t;
+	float center_x;
+	float center_y;
+
+	// Trail modes
+	float previous_destination_x;
+	float previous_destination_y;
+	float count_remainder;
+	uint64_t rng_state;
+	CursorParticle particles[MAX_CURSOR_PARTICLES];
+	int particle_count;
+};
+
+// Where the cursor should end up, in pixels
+struct CursorAnimationTarget {
+	float x;
+	float y;
+	float width;
+	float height;
+	CursorShape shape;
+	// Fraction of the cell covered by a vertical or horizontal cursor
+	float cell_percentage;
+	bool immediate;
+	// Cursor background color, used for the particles
+	uint32_t color;
+};
+
+struct CursorAnimation {
+	CursorAnimationSettings settings;
+
+	CursorCorner corners[4];
+	CursorVfx vfxs[MAX_CURSOR_VFX_MODES];
+	int vfx_count;
+
+	bool initialized;
+	float destination_x;
+	float destination_y;
+	CursorShape shape;
+};
+
+void CursorAnimationInitialize(CursorAnimation *animation);
+// Applies a g:ndx_cursor_<name> variable, a nil value restores the default.
+// Returns false if the name is unknown.
+bool CursorAnimationSetOption(CursorAnimation *animation, const char *name, size_t length, mpack_node_t value);
+// Snaps the cursor to its next destination instead of animating from the old one
+void CursorAnimationReset(CursorAnimation *animation);
+// Advances the animation by dt seconds, returns whether it's still animating
+bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarget *target, float dt);

@@ -61,6 +61,7 @@ void NvimGetOptionValue(Nvim *nvim, const char *option);
 void NvimParseOptionValueStr(Nvim *nvim, mpack_node_t value_node, Vec<char> *value_out);
 
 void NvimSendCommand(Nvim *nvim, const char *command);
+void NvimSendCursorOptions(Nvim *nvim);
 void NvimSendUIAttach(Nvim *nvim, int grid_rows, int grid_cols);
 void NvimSendResize(Nvim *nvim, int grid_rows, int grid_cols);
 void NvimSendChar(Nvim *nvim, wchar_t input_char);

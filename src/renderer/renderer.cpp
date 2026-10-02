@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "renderer/cursor_animation.h"
 #include "renderer/glyph_renderer.h"
 
 void InitializeD2D(Renderer *renderer) {
@@ -67,6 +68,8 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 	renderer->d3d_context->OMSetRenderTargets(ARRAYSIZE(null_views), null_views, nullptr);
 	renderer->d2d_context->SetTarget(nullptr);
 	renderer->d3d_context->Flush();
+	// Recreated with the new size on the next draw
+	SafeRelease(&renderer->d2d_grid_bitmap);
 
 	if (renderer->dxgi_swapchain) {
 		renderer->d2d_target_bitmap->Release();
@@ -152,6 +155,7 @@ void HandleDeviceLost(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_device);
 	SafeRelease(&renderer->d2d_context);
 	SafeRelease(&renderer->d2d_target_bitmap);
+	SafeRelease(&renderer->d2d_grid_bitmap);
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
@@ -214,6 +218,12 @@ void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, f
 
 	wcscpy_s(renderer->fallback_font, MAX_FONT_LENGTH, L"Consolas");
 
+	// Too big for the stack, the renderer lives in wWinMain
+	renderer->cursor_animation = static_cast<CursorAnimation *>(malloc(sizeof(CursorAnimation)));
+	CursorAnimationInitialize(renderer->cursor_animation);
+	renderer->window_focused = true;
+	QueryPerformanceFrequency(&renderer->performance_frequency);
+
 	InitializeLocale(renderer);
 
 	InitializeD2D(renderer);
@@ -241,12 +251,14 @@ void RendererShutdown(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_device);
 	SafeRelease(&renderer->d2d_context);
 	SafeRelease(&renderer->d2d_target_bitmap);
+	SafeRelease(&renderer->d2d_grid_bitmap);
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
 	SafeRelease(&renderer->dwrite_font_fallback);
 	SafeRelease(&renderer->font_face);
 	delete renderer->glyph_renderer;
+	free(renderer->cursor_animation);
 
 	free(renderer->grid_chars);
 	free(renderer->wchar_buffer);
@@ -893,40 +905,213 @@ void DrawGridLines(Renderer *renderer, mpack_node_t grid_lines) {
 	}
 }
 
-void DrawCursor(Renderer *renderer) {
-	if (!renderer->cursor.mode_info) return;
-	int cursor_grid_offset = renderer->cursor.row * renderer->grid_cols + renderer->cursor.col;
+struct CursorCell {
+	int grid_offset;
+	// 2 for wide chars
+	int width;
+	HighlightAttributes hl_attribs;
+};
 
-	int double_width_char_factor = 1;
-	if (cursor_grid_offset < (renderer->grid_rows * renderer->grid_cols) &&
-		renderer->grid_cell_properties[cursor_grid_offset].is_wide_char) {
-		double_width_char_factor += 1;
+bool GetCursorCell(Renderer *renderer, CursorCell *cell) {
+	if (!renderer->cursor.mode_info || !renderer->grid_initialized) return false;
+	if (renderer->cursor.row < 0 || renderer->cursor.row >= renderer->grid_rows ||
+		renderer->cursor.col < 0 || renderer->cursor.col >= renderer->grid_cols) {
+		return false;
 	}
+	cell->grid_offset = renderer->cursor.row * renderer->grid_cols + renderer->cursor.col;
+	cell->width = renderer->grid_cell_properties[cell->grid_offset].is_wide_char ? 2 : 1;
 
-	HighlightAttributes cursor_hl_attribs = renderer->hl_attribs[renderer->cursor.mode_info->hl_attrib_id];
+	cell->hl_attribs = renderer->hl_attribs[renderer->cursor.mode_info->hl_attrib_id];
 
 	// Inherit GUI options for char under cursor (like italic)
-	int hl_attrib_id_under_cursor = renderer->grid_cell_properties[cursor_grid_offset].hl_attrib_id;
+	int hl_attrib_id_under_cursor = renderer->grid_cell_properties[cell->grid_offset].hl_attrib_id;
 	HighlightAttributes under_cursor_hl_attribs = renderer->hl_attribs[hl_attrib_id_under_cursor];
-	cursor_hl_attribs.flags = under_cursor_hl_attribs.flags;
+	cell->hl_attribs.flags = under_cursor_hl_attribs.flags;
 
 	if (renderer->cursor.mode_info->hl_attrib_id == 0) {
-		cursor_hl_attribs.flags |= HL_ATTRIB_REVERSE;
+		cell->hl_attribs.flags |= HL_ATTRIB_REVERSE;
 	}
+	return true;
+}
+
+void DrawCursor(Renderer *renderer) {
+	CursorCell cell;
+	if (!GetCursorCell(renderer, &cell)) return;
 
 	D2D1_RECT_F cursor_rect {
 		.left = renderer->cursor.col * renderer->font_width,
 		.top = renderer->cursor.row * renderer->font_height,
-		.right = renderer->cursor.col * renderer->font_width + renderer->font_width * double_width_char_factor,
+		.right = renderer->cursor.col * renderer->font_width + renderer->font_width * cell.width,
 		.bottom = (renderer->cursor.row * renderer->font_height) + renderer->font_height
 	};
 	D2D1_RECT_F cursor_fg_rect = GetCursorForegroundRect(renderer, cursor_rect);
-	DrawBackgroundRect(renderer, cursor_fg_rect, &cursor_hl_attribs);
+	DrawBackgroundRect(renderer, cursor_fg_rect, &cell.hl_attribs);
 
 	if (renderer->cursor.mode_info->shape == CursorShape::Block) {
-		DrawHighlightedText(renderer, cursor_fg_rect, &renderer->grid_chars[cursor_grid_offset],
-			double_width_char_factor, &cursor_hl_attribs);
+		DrawHighlightedText(renderer, cursor_fg_rect, &renderer->grid_chars[cell.grid_offset],
+			cell.width, &cell.hl_attribs);
 	}
+}
+
+ID2D1PathGeometry *CreateQuadGeometry(Renderer *renderer, const D2D1_POINT_2F points[4]) {
+	ID2D1PathGeometry *geometry;
+	if (FAILED(renderer->d2d_factory->CreatePathGeometry(&geometry))) return nullptr;
+
+	ID2D1GeometrySink *sink;
+	if (FAILED(geometry->Open(&sink))) {
+		geometry->Release();
+		return nullptr;
+	}
+	sink->BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
+	sink->AddLines(&points[1], 3);
+	sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+	HRESULT hr = sink->Close();
+	sink->Release();
+	if (FAILED(hr)) {
+		geometry->Release();
+		return nullptr;
+	}
+	return geometry;
+}
+
+// Only the outline of the cursor is drawn while the window is unfocused
+ID2D1PathGeometry *CreateUnfocusedOutline(Renderer *renderer, ID2D1PathGeometry *cursor_geometry, float outline_width) {
+	const CursorCorner *corners = renderer->cursor_animation->corners;
+	D2D1_POINT_2F inner_points[4] = {
+		{ corners[0].x + outline_width, corners[0].y + outline_width },
+		{ corners[1].x - outline_width, corners[1].y + outline_width },
+		{ corners[2].x - outline_width, corners[2].y - outline_width },
+		{ corners[3].x + outline_width, corners[3].y - outline_width }
+	};
+	ID2D1PathGeometry *inner = CreateQuadGeometry(renderer, inner_points);
+	if (!inner) return nullptr;
+
+	ID2D1PathGeometry *outline = nullptr;
+	ID2D1GeometrySink *sink;
+	if (SUCCEEDED(renderer->d2d_factory->CreatePathGeometry(&outline)) && SUCCEEDED(outline->Open(&sink))) {
+		HRESULT hr = cursor_geometry->CombineWithGeometry(inner, D2D1_COMBINE_MODE_EXCLUDE, nullptr, sink);
+		if (SUCCEEDED(hr)) {
+			hr = sink->Close();
+		}
+		sink->Release();
+		if (FAILED(hr)) {
+			SafeRelease(&outline);
+		}
+	}
+	else {
+		SafeRelease(&outline);
+	}
+	inner->Release();
+	return outline;
+}
+
+void DrawAnimatedCursor(Renderer *renderer, CursorCell *cell, const CursorAnimationTarget *target) {
+	const CursorAnimation *animation = renderer->cursor_animation;
+	ID2D1DeviceContext4 *context = renderer->d2d_context;
+
+	// Snap the corners to whole pixels relative to the cell, so the resting cursor is crisp
+	float fract_x = target->x - floorf(target->x);
+	float fract_y = target->y - floorf(target->y);
+	D2D1_POINT_2F points[4];
+	for (int i = 0; i < 4; ++i) {
+		points[i] = D2D1_POINT_2F {
+			.x = roundf(animation->corners[i].x - fract_x) + fract_x,
+			.y = roundf(animation->corners[i].y - fract_y) + fract_y
+		};
+	}
+
+	ID2D1PathGeometry *geometry = CreateQuadGeometry(renderer, points);
+	if (!geometry) return;
+
+	if (!renderer->window_focused && target->shape == CursorShape::Block) {
+		float outline_width = animation->settings.unfocused_outline_width * renderer->font_size;
+		if (ID2D1PathGeometry *outline = CreateUnfocusedOutline(renderer, geometry, outline_width)) {
+			geometry->Release();
+			geometry = outline;
+		}
+	}
+
+	D2D1_ANTIALIAS_MODE antialias_mode = animation->settings.antialiasing ?
+		D2D1_ANTIALIAS_MODE_PER_PRIMITIVE : D2D1_ANTIALIAS_MODE_ALIASED;
+	context->SetAntialiasMode(antialias_mode);
+	renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(target->color));
+	context->FillGeometry(geometry, renderer->d2d_background_rect_brush);
+	context->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+
+	// The char under the cursor, in the cursor colors where the cursor covers it
+	if (target->shape != CursorShape::None) {
+		context->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), geometry, antialias_mode), nullptr);
+		D2D1_RECT_F cell_rect {
+			.left = target->x,
+			.top = target->y,
+			.right = target->x + renderer->font_width * cell->width,
+			.bottom = target->y + target->height
+		};
+		DrawHighlightedText(renderer, cell_rect, &renderer->grid_chars[cell->grid_offset], cell->width, &cell->hl_attribs);
+		context->PopLayer();
+	}
+
+	geometry->Release();
+}
+
+void DrawCursorVfx(Renderer *renderer, uint32_t cursor_color) {
+	const CursorAnimation *animation = renderer->cursor_animation;
+	const CursorAnimationSettings *settings = &animation->settings;
+	ID2D1DeviceContext4 *context = renderer->d2d_context;
+	ID2D1SolidColorBrush *brush = renderer->d2d_background_rect_brush;
+	float stroke_width = renderer->font_height * 0.2f;
+
+	context->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+	for (int i = 0; i < animation->vfx_count; ++i) {
+		const CursorVfx *vfx = &animation->vfxs[i];
+		switch (vfx->mode) {
+		case CursorVfxMode::SonicBoom:
+		case CursorVfxMode::Ripple:
+		case CursorVfxMode::Wireframe: {
+			if (vfx->t >= 1.0f) break;
+
+			// Grows while fading out
+			float opacity = settings->vfx_opacity * (1.0f - vfx->t * vfx->t) / 255.0f;
+			brush->SetColor(D2D1::ColorF(cursor_color, opacity));
+			float half_size = vfx->t * renderer->font_height * 3.0f * 0.5f;
+			D2D1_ELLIPSE ellipse = D2D1::Ellipse(D2D1::Point2F(vfx->center_x, vfx->center_y), half_size, half_size);
+			if (vfx->mode == CursorVfxMode::SonicBoom) {
+				context->FillEllipse(ellipse, brush);
+			}
+			else if (vfx->mode == CursorVfxMode::Ripple) {
+				context->DrawEllipse(ellipse, brush, stroke_width);
+			}
+			else {
+				context->DrawRectangle(D2D1::RectF(vfx->center_x - half_size, vfx->center_y - half_size,
+					vfx->center_x + half_size, vfx->center_y + half_size), brush, stroke_width);
+			}
+		} break;
+		case CursorVfxMode::Railgun:
+		case CursorVfxMode::Torpedo:
+		case CursorVfxMode::PixieDust: {
+			if (settings->vfx_particle_lifetime <= 0.0f) break;
+
+			for (int j = 0; j < vfx->particle_count; ++j) {
+				const CursorParticle *particle = &vfx->particles[j];
+				float lifetime = particle->lifetime / settings->vfx_particle_lifetime;
+				brush->SetColor(D2D1::ColorF(particle->color, lifetime * settings->vfx_opacity / 255.0f));
+
+				if (vfx->mode == CursorVfxMode::PixieDust) {
+					float half_size = renderer->font_width * 0.2f * 0.5f;
+					context->FillRectangle(D2D1::RectF(particle->x - half_size, particle->y - half_size,
+						particle->x + half_size, particle->y + half_size), brush);
+				}
+				else {
+					// Rings shrinking as they fade out
+					float radius = renderer->font_width * 0.5f * lifetime * 0.5f;
+					context->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(particle->x, particle->y), radius, radius),
+						brush, stroke_width);
+				}
+			}
+		} break;
+		}
+	}
+	context->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 }
 
 bool UpdateGridSize(Renderer *renderer, mpack_node_t grid_resize) {
@@ -1230,6 +1415,12 @@ void UpdateWindowTitle(Renderer *renderer, mpack_node_t set_title) {
 void UpdateCursorMode(Renderer *renderer, mpack_node_t mode_change) {
 	mpack_node_t mode_change_params = mpack_node_array_at(mode_change, 1);
 	renderer->cursor.mode_info = &renderer->cursor_mode_infos[mpack_node_array_at(mode_change_params, 1).data->value.u];
+
+	mpack_node_t mode_name = mpack_node_array_at(mode_change_params, 0);
+	const char *mode_name_str = mpack_node_str(mode_name);
+	size_t mode_name_length = mpack_node_strlen(mode_name);
+	renderer->in_insert_mode = mode_name_length == 6 && !strncmp(mode_name_str, "insert", 6);
+	renderer->in_cmdline_mode = mode_name_length >= 7 && !strncmp(mode_name_str, "cmdline", 7);
 }
 
 void UpdateCursorModeInfos(Renderer *renderer, mpack_node_t mode_info_set_params) {
@@ -1527,15 +1718,56 @@ void ClearGrid(Renderer *renderer) {
 	DrawBackgroundRect(renderer, rect, &renderer->hl_attribs[0]);
 }
 
+// Turns the cursor animation on or off once the settings change. The grid
+// is then drawn into another target, so it is drawn again from scratch.
+void UpdateCursorAnimationActive(Renderer *renderer) {
+	bool enabled = renderer->cursor_animation->settings.enabled;
+	if (enabled == renderer->cursor_animation_active) return;
+
+	renderer->cursor_animation_active = enabled;
+	renderer->cursor_animating = false;
+	renderer->draws_invalidated = true;
+	if (!enabled) {
+		SafeRelease(&renderer->d2d_grid_bitmap);
+	}
+}
+
+void CreateGridBitmap(Renderer *renderer) {
+	constexpr D2D1_BITMAP_PROPERTIES1 grid_bitmap_properties {
+		.pixelFormat = D2D1_PIXEL_FORMAT {
+			.format = DXGI_FORMAT_B8G8R8A8_UNORM,
+			.alphaMode = D2D1_ALPHA_MODE_IGNORE
+		},
+		.dpiX = DEFAULT_DPI,
+		.dpiY = DEFAULT_DPI,
+		.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET
+	};
+	D2D1_SIZE_U size {
+		.width = max(renderer->pixel_size.width, 1u),
+		.height = max(renderer->pixel_size.height, 1u)
+	};
+	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &grid_bitmap_properties, &renderer->d2d_grid_bitmap));
+	renderer->draws_invalidated = true;
+}
+
 void StartDraw(Renderer *renderer) {
 	if (!renderer->draw_active) {
-		WaitForSingleObjectEx(
-			renderer->swapchain_wait_handle,
-			1000,
-			true
-		);
+		if (!renderer->swapchain_wait_done) {
+			WaitForSingleObjectEx(
+				renderer->swapchain_wait_handle,
+				1000,
+				true
+			);
+		}
+		renderer->swapchain_wait_done = false;
 
-		renderer->d2d_context->SetTarget(renderer->d2d_target_bitmap);
+		UpdateCursorAnimationActive(renderer);
+		if (renderer->cursor_animation_active && !renderer->d2d_grid_bitmap) {
+			CreateGridBitmap(renderer);
+		}
+
+		renderer->d2d_context->SetTarget(renderer->cursor_animation_active ?
+			renderer->d2d_grid_bitmap : renderer->d2d_target_bitmap);
 		renderer->d2d_context->BeginDraw();
 		renderer->d2d_context->SetTransform(D2D1::IdentityMatrix());
 		renderer->draw_active = true;
@@ -1553,13 +1785,76 @@ void CopyFrontToBack(Renderer *renderer) {
 	SafeRelease(&back);
 }
 
+// Seconds since the previous animation frame
+float NextAnimationTimeStep(Renderer *renderer) {
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	float dt = static_cast<float>(now.QuadPart - renderer->cursor_animation_last_frame.QuadPart) /
+		static_cast<float>(renderer->performance_frequency.QuadPart);
+	renderer->cursor_animation_last_frame = now;
+
+	// After being idle, the time since the last frame says nothing about
+	// the frame rate, start the animation with a typical frame instead
+	return renderer->cursor_animating ? min(dt, 0.1f) : min(dt, 1.0f / 60.0f);
+}
+
+// Draws the grid with the animated cursor and its particles on top to the back buffer
+void ComposeFrame(Renderer *renderer) {
+	ID2D1DeviceContext4 *context = renderer->d2d_context;
+	context->SetTarget(renderer->d2d_target_bitmap);
+	context->DrawImage(renderer->d2d_grid_bitmap, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
+
+	float dt = NextAnimationTimeStep(renderer);
+	CursorCell cell;
+	if (!GetCursorCell(renderer, &cell)) {
+		renderer->cursor_animating = false;
+		return;
+	}
+
+	CursorAnimation *animation = renderer->cursor_animation;
+	const CursorAnimationSettings *settings = &animation->settings;
+	bool changed_to_from_cmdline = renderer->in_cmdline_mode != renderer->cursor_animation_was_in_cmdline;
+	renderer->cursor_animation_was_in_cmdline = renderer->in_cmdline_mode;
+
+	// Same size as the cursor drawn by DrawCursor, the bars are 2 pixels wide
+	CursorShape shape = renderer->cursor.mode_info->shape;
+	float width = renderer->font_width * cell.width;
+	CursorAnimationTarget target {
+		.x = renderer->cursor.col * renderer->font_width,
+		.y = renderer->cursor.row * renderer->font_height,
+		.width = width,
+		.height = renderer->font_height,
+		.shape = shape,
+		.cell_percentage = shape == CursorShape::Vertical ? 2.0f / width : 2.0f / renderer->font_height,
+		.immediate = (!settings->animate_in_insert_mode && renderer->in_insert_mode) ||
+			(!settings->animate_command_line && changed_to_from_cmdline),
+		.color = CreateBackgroundColor(renderer, &cell.hl_attribs)
+	};
+	renderer->cursor_animating = CursorAnimationUpdate(animation, &target, dt);
+
+	// The composition string has a caret of its own
+	if (!renderer->ui_busy && renderer->composition_length == 0) {
+		DrawAnimatedCursor(renderer, &cell, &target);
+	}
+	DrawCursorVfx(renderer, target.color);
+}
+
 void FinishDraw(Renderer *renderer) {
+	if (renderer->cursor_animation_active) {
+		ComposeFrame(renderer);
+	}
 	renderer->d2d_context->EndDraw();
 
-	HRESULT hr = renderer->dxgi_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+	// Animation frames are paced by the display, everything else is shown right away
+	bool vsync = renderer->cursor_animation_active && renderer->cursor_animating;
+	HRESULT hr = renderer->dxgi_swapchain->Present(vsync ? 1 : 0, vsync ? 0 : DXGI_PRESENT_ALLOW_TEARING);
 	renderer->draw_active = false;
 
-	CopyFrontToBack(renderer);
+	// The frame is composed from scratch with the animation, otherwise
+	// the next one is drawn on top of this one
+	if (!renderer->cursor_animation_active) {
+		CopyFrontToBack(renderer);
+	}
 
 	if (hr == DXGI_ERROR_DEVICE_REMOVED) {
 		HandleDeviceLost(renderer);
@@ -1570,12 +1865,47 @@ void RendererFlush(Renderer* renderer) {
 	StartDraw(renderer);
 	ClearComposition(renderer);
 	DrawDirtyGridLines(renderer);
-	if (!renderer->ui_busy) {
+	// The animated cursor is drawn over the grid when composing the frame
+	if (!renderer->ui_busy && !renderer->cursor_animation_active) {
 		DrawCursor(renderer);
 	}
 	DrawComposition(renderer);
 	DrawBorderRectangles(renderer);
 	FinishDraw(renderer);
+}
+
+bool RendererIsAnimating(Renderer *renderer) {
+	return renderer->cursor_animation_active && renderer->cursor_animating && renderer->dxgi_swapchain;
+}
+
+void RendererAnimate(Renderer *renderer) {
+	// The caller already waited for the swapchain
+	renderer->swapchain_wait_done = true;
+	RendererFlush(renderer);
+}
+
+void RendererSetCursorOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value) {
+	constexpr const char *PREFIX = "ndx_cursor_";
+	size_t prefix_length = strlen(PREFIX);
+	if (length <= prefix_length || strncmp(name, PREFIX, prefix_length)) return;
+
+	if (!CursorAnimationSetOption(renderer->cursor_animation, name + prefix_length, length - prefix_length, value)) {
+		return;
+	}
+
+	// Show the change right away unless nvim is in the middle of a redraw
+	if (renderer->grid_initialized && renderer->dxgi_swapchain && !renderer->draw_active) {
+		RendererFlush(renderer);
+	}
+}
+
+void RendererSetFocus(Renderer *renderer, bool focused) {
+	renderer->window_focused = focused;
+
+	// The animated cursor is drawn as an outline while unfocused
+	if (renderer->cursor_animation_active && renderer->grid_initialized && !renderer->draw_active) {
+		RendererFlush(renderer);
+	}
 }
 
 void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximized) {

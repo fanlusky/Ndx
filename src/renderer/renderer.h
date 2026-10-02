@@ -101,10 +101,26 @@ constexpr float DEFAULT_DPI = 96.0f;
 constexpr float POINTS_PER_INCH = 72.0f;
 struct GlyphDrawingEffect;
 struct GlyphRenderer;
+struct CursorAnimation;
 struct Renderer {
 	CursorModeInfo cursor_mode_infos[MAX_CURSOR_MODE_INFOS];
 	Vec<HighlightAttributes> hl_attribs;
 	Cursor cursor;
+	bool in_insert_mode;
+	bool in_cmdline_mode;
+
+	// With the cursor animation, the grid is drawn into d2d_grid_bitmap and every
+	// frame is composed of it with the animated cursor and its particles on top
+	CursorAnimation *cursor_animation;
+	bool cursor_animation_active;
+	bool cursor_animating;
+	bool cursor_animation_was_in_cmdline;
+	LARGE_INTEGER cursor_animation_last_frame;
+	LARGE_INTEGER performance_frequency;
+	ID2D1Bitmap1 *d2d_grid_bitmap;
+	bool window_focused;
+	// The frame latency waitable object has already been waited on for the next frame
+	bool swapchain_wait_done;
 
 	GlyphRenderer *glyph_renderer;
 
@@ -192,6 +208,14 @@ void RendererSetComposition(Renderer *renderer, const wchar_t *text, uint32_t le
 	const CompositionClause *clauses, uint32_t clause_count);
 // Client rect of [start, end) of a composition string as it would be drawn at the cursor
 RECT RendererGetCompositionTextRect(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t start, uint32_t end);
+
+// Applies a g:ndx_cursor_<name> variable, see CursorAnimationSetOption
+void RendererSetCursorOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value);
+void RendererSetFocus(Renderer *renderer, bool focused);
+// Whether the cursor animation needs more frames, drawn with RendererAnimate
+// once swapchain_wait_handle is signaled
+bool RendererIsAnimating(Renderer *renderer);
+void RendererAnimate(Renderer *renderer);
 
 PixelSize RendererGridToPixelSize(Renderer *renderer, int rows, int cols);
 GridSize RendererPixelsToGridSize(Renderer *renderer, int width, int height);
