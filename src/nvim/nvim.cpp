@@ -44,15 +44,10 @@ DWORD WINAPI NvimMessageHandler(LPVOID param) {
 
 DWORD WINAPI NvimProcessMonitor(LPVOID param) {
 	Nvim *nvim = static_cast<Nvim *>(param);
-	while (true) {
-		DWORD exit_code;
-		if (GetExitCodeProcess(nvim->process_info.hProcess, &exit_code) && exit_code == STILL_ACTIVE) {
-			Sleep(1);
-		}
-		else {
-			nvim->exit_code = exit_code;
-			break;
-		}
+	WaitForSingleObject(nvim->process_info.hProcess, INFINITE);
+	DWORD exit_code;
+	if (GetExitCodeProcess(nvim->process_info.hProcess, &exit_code)) {
+		nvim->exit_code = exit_code;
 	}
 	PostMessage(nvim->hwnd, WM_DESTROY, 0, 0);
 	return 0;
@@ -73,9 +68,12 @@ void NvimInitialize(Nvim *nvim, wchar_t *command_line, HWND hwnd) {
 		.nLength = sizeof(SECURITY_ATTRIBUTES),
 		.bInheritHandle = true
 	};
+	// Large pipe buffers so neither side blocks on a write while the other is busy,
+	// e.g. nvim sending a big redraw while we're still rendering the previous one
+	constexpr DWORD PIPE_BUFFER_SIZE = Megabytes(1);
 	HANDLE stdin_read, stdout_write, stderr_write;
-	CreatePipe(&stdin_read, &nvim->stdin_write, &sec_attribs, 0);
-	CreatePipe(&nvim->stdout_read, &stdout_write, &sec_attribs, 0);
+	CreatePipe(&stdin_read, &nvim->stdin_write, &sec_attribs, PIPE_BUFFER_SIZE);
+	CreatePipe(&nvim->stdout_read, &stdout_write, &sec_attribs, PIPE_BUFFER_SIZE);
 	CreatePipe(&nvim->stderr_read, &stderr_write, &sec_attribs, 0);
 
 	STARTUPINFO startup_info {
@@ -235,7 +233,7 @@ void NvimSendModifiedInput(Nvim *nvim, const char *input) {
 	char data[MAX_MPACK_OUTBOUND_MESSAGE_SIZE];
 	mpack_writer_t writer;
 	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
-	MPackStartRequest(RegisterRequest(nvim, nvim_input), NVIM_REQUEST_NAMES[nvim_input], &writer);
+	MPackStartNotification(NVIM_OUTBOUND_NOTIFICATION_NAMES[nvim_input], &writer);
 	mpack_start_array(&writer, 1);
 	mpack_write_cstr(&writer, input_string);
 	mpack_finish_array(&writer);
@@ -260,7 +258,7 @@ void NvimSendChar(Nvim *nvim, wchar_t input_char) {
 	char data[MAX_MPACK_OUTBOUND_MESSAGE_SIZE];
 	mpack_writer_t writer;
 	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
-	MPackStartRequest(RegisterRequest(nvim, nvim_input), NVIM_REQUEST_NAMES[nvim_input], &writer);
+	MPackStartNotification(NVIM_OUTBOUND_NOTIFICATION_NAMES[nvim_input], &writer);
 	mpack_start_array(&writer, 1);
 	mpack_write_cstr(&writer, utf8_encoded);
 	mpack_finish_array(&writer);
@@ -283,7 +281,7 @@ void NvimSendInput(Nvim *nvim, const char *input_chars) {
 	mpack_writer_t writer;
 	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
 
-	MPackStartRequest(RegisterRequest(nvim, nvim_input), NVIM_REQUEST_NAMES[nvim_input], &writer);
+	MPackStartNotification(NVIM_OUTBOUND_NOTIFICATION_NAMES[nvim_input], &writer);
 	mpack_start_array(&writer, 1);
 	mpack_write_cstr(&writer, input_chars);
 	mpack_finish_array(&writer);
@@ -333,7 +331,7 @@ void NvimSendMouseInput(Nvim *nvim, MouseButton button, MouseAction action, int 
 	char data[MAX_MPACK_OUTBOUND_MESSAGE_SIZE];
 	mpack_writer_t writer;
 	mpack_writer_init(&writer, data, MAX_MPACK_OUTBOUND_MESSAGE_SIZE);
-	MPackStartRequest(RegisterRequest(nvim, nvim_input_mouse), NVIM_REQUEST_NAMES[nvim_input_mouse], &writer);
+	MPackStartNotification(NVIM_OUTBOUND_NOTIFICATION_NAMES[nvim_input_mouse], &writer);
 	mpack_start_array(&writer, 6);
 
 	switch (button) {

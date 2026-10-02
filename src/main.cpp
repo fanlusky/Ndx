@@ -71,8 +71,6 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 			}
 		} break;
 		case NvimRequest::vim_get_api_info:
-		case NvimRequest::nvim_input:
-		case NvimRequest::nvim_input_mouse:
 		case NvimRequest::nvim_command: {
 		} break;
 		}
