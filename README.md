@@ -75,7 +75,7 @@ Available command-line options:
 | `--cursor-timeout=<int>` | Hide the cursor after the given idle time in milliseconds |
 | `--neovim-bin=<path>` | Use a specific `nvim.exe` path |
 
-## Optional animations
+## Optional animations and text glow
 
 Animations are off by default. Enable them in your Neovim Lua configuration:
 
@@ -83,9 +83,12 @@ Animations are off by default. Enable them in your Neovim Lua configuration:
 vim.g.ndx_cursor_animation = true
 vim.g.ndx_cursor_vfx_mode = "railgun" -- or a list, e.g. { "railgun", "sonicboom" }
 vim.g.ndx_scroll_animation = true
+vim.g.ndx_neon_text = true -- glow around text; disabled by default
 ```
 
 Ndx supports cursor movement animation, cursor particle effects, smooth cursor blinking, and smooth scrolling. The settings use the corresponding Neovide names with an `ndx_` prefix. For example, `g:ndx_cursor_animation_length` controls cursor movement duration and `g:ndx_scroll_animation_length` controls scroll duration. Unset settings use their defaults. Smooth scrolling follows Neovim window scroll events; moving floating windows are not animated.
+
+Set `g:ndx_neon_text` to `true` or `false` to toggle the text glow while Ndx is running. It is off by default.
 
 ## License and project history
 

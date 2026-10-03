@@ -80,6 +80,9 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 	renderer->d3d_context->Flush();
 	// Recreated with the new size on the next draw
 	SafeRelease(&renderer->d2d_grid_bitmap);
+	SafeRelease(&renderer->d2d_neon_bitmap);
+	SafeRelease(&renderer->d2d_neon_blur_near);
+	SafeRelease(&renderer->d2d_neon_blur_far);
 	ScrollAnimationReset(renderer->scroll_animation);
 
 	if (renderer->dxgi_swapchain) {
@@ -169,6 +172,9 @@ void HandleDeviceLost(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_context);
 	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
+	SafeRelease(&renderer->d2d_neon_bitmap);
+	SafeRelease(&renderer->d2d_neon_blur_near);
+	SafeRelease(&renderer->d2d_neon_blur_far);
 	ScrollAnimationReleaseResources(renderer->scroll_animation);
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
@@ -278,6 +284,9 @@ void RendererShutdown(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_context);
 	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
+	SafeRelease(&renderer->d2d_neon_bitmap);
+	SafeRelease(&renderer->d2d_neon_blur_near);
+	SafeRelease(&renderer->d2d_neon_blur_far);
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
@@ -839,6 +848,14 @@ void DrawGridLine(Renderer *renderer, int row) {
 	}
 	text_layout->Draw(renderer, renderer->glyph_renderer, 0.0f, rect.top);
 	renderer->d2d_context->PopAxisAlignedClip();
+	if (renderer->neon_text && renderer->d2d_neon_bitmap) {
+		ID2D1Bitmap1 *target = renderer->animation_active ? renderer->d2d_grid_bitmap : renderer->d2d_target_bitmap;
+		renderer->d2d_context->SetTarget(renderer->d2d_neon_bitmap);
+		renderer->d2d_context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
+		text_layout->Draw(renderer, renderer->glyph_renderer, 0.0f, rect.top);
+		renderer->d2d_context->PopAxisAlignedClip();
+		renderer->d2d_context->SetTarget(target);
+	}
 }
 
 void MarkRowDirty(Renderer *renderer, int row) {
@@ -865,6 +882,37 @@ void DrawDirtyGridLines(Renderer *renderer) {
 		}
 	}
 	renderer->draws_invalidated = false;
+}
+
+void CreateNeonResources(Renderer *renderer) {
+	D2D1_BITMAP_PROPERTIES1 properties {
+		.pixelFormat = D2D1_PIXEL_FORMAT {
+			.format = DXGI_FORMAT_B8G8R8A8_UNORM,
+			.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED
+		},
+		.dpiX = DEFAULT_DPI,
+		.dpiY = DEFAULT_DPI,
+		.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET
+	};
+	D2D1_SIZE_U size {
+		.width = max(renderer->pixel_size.width, 1u),
+		.height = max(renderer->pixel_size.height, 1u)
+	};
+	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_bitmap));
+	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1GaussianBlur, &renderer->d2d_neon_blur_near));
+	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1GaussianBlur, &renderer->d2d_neon_blur_far));
+	renderer->d2d_neon_blur_near->SetInput(0, renderer->d2d_neon_bitmap);
+	renderer->d2d_neon_blur_far->SetInput(0, renderer->d2d_neon_bitmap);
+	WIN_CHECK(renderer->d2d_neon_blur_near->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, 2.0f));
+	WIN_CHECK(renderer->d2d_neon_blur_far->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, 4.0f));
+}
+
+void DrawNeonGlow(Renderer *renderer) {
+	// Draw the blurred copies over the sharp grid text, as in NeonWindow.
+	renderer->d2d_context->DrawImage(renderer->d2d_neon_blur_far, nullptr, nullptr,
+		D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_PLUS);
+	renderer->d2d_context->DrawImage(renderer->d2d_neon_blur_near, nullptr, nullptr,
+		D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_PLUS);
 }
 
 bool IsSurrogatePair(wchar_t left, wchar_t right) {
@@ -2099,7 +2147,25 @@ void RendererFlush(Renderer* renderer) {
 	StartDraw(renderer);
 	ClearComposition(renderer);
 	ScrollAnimationApplyPending(renderer, renderer->flushing_nvim_redraw);
+	bool redraw_neon = renderer->neon_text && (renderer->draws_invalidated || !renderer->animation_active);
+	if (renderer->neon_text && renderer->dirty_rows) {
+		for (int i = 0; i < renderer->grid_rows; ++i) {
+			if (renderer->dirty_rows[i]) {
+				redraw_neon = true;
+				break;
+			}
+		}
+	}
+	if (redraw_neon) {
+		if (!renderer->d2d_neon_bitmap) CreateNeonResources(renderer);
+		ID2D1Bitmap1 *target = renderer->animation_active ? renderer->d2d_grid_bitmap : renderer->d2d_target_bitmap;
+		renderer->d2d_context->SetTarget(renderer->d2d_neon_bitmap);
+		renderer->d2d_context->Clear(D2D1::ColorF(0, 0.0f));
+		renderer->d2d_context->SetTarget(target);
+		renderer->draws_invalidated = true;
+	}
 	DrawDirtyGridLines(renderer);
+	if (redraw_neon) DrawNeonGlow(renderer);
 	// The animated cursor is drawn over the grid when composing the frame
 	if (!renderer->ui_busy && !renderer->animation_active) {
 		DrawCursor(renderer);
@@ -2209,7 +2275,20 @@ bool HasPrefix(const char *name, size_t length, const char *prefix) {
 
 void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value) {
 	bool known = false;
-	if (HasPrefix(name, length, "ndx_cursor_")) {
+	if (length == strlen("ndx_neon_text") && !strncmp(name, "ndx_neon_text", length)) {
+		bool enabled = NodeToBool(value, false);
+		if (enabled != renderer->neon_text) {
+			renderer->neon_text = enabled;
+			renderer->draws_invalidated = true;
+			if (!enabled) {
+				SafeRelease(&renderer->d2d_neon_bitmap);
+				SafeRelease(&renderer->d2d_neon_blur_near);
+				SafeRelease(&renderer->d2d_neon_blur_far);
+			}
+		}
+		known = true;
+	}
+	else if (HasPrefix(name, length, "ndx_cursor_")) {
 		size_t prefix_length = strlen("ndx_cursor_");
 		known = CursorAnimationSetOption(renderer->cursor_animation, name + prefix_length, length - prefix_length, value);
 	}

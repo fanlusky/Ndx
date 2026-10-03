@@ -45,6 +45,7 @@ target_link_libraries(Ndx PUBLIC
     user32.lib 
     d3d11.lib 
     d2d1.lib 
+    dxguid.lib
     dwrite.lib
     Shcore.lib
     Dwmapi.lib
@@ -63,6 +64,7 @@ target_precompile_headers(Ndx PUBLIC
     <d3d11_4.h>
     <d2d1_3.h>
     <d2d1_3helper.h>
+    <d2d1effects.h>
     <dwrite_3.h>
     <shellscalingapi.h>
     <dwmapi.h>
