@@ -2246,8 +2246,11 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 			SetGuiOptions(renderer, redraw_command_arr);
 		}
 		if (MPackMatchString(redraw_command_name, "grid_resize")) {
-			if (UpdateGridSize(renderer, redraw_command_arr))
+			if (UpdateGridSize(renderer, redraw_command_arr) &&
+				(GetWindowLong(renderer->hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW))
 			{
+				// Fullscreen size belongs to the monitor; adding window frame dimensions here
+				// would make each grid resize expand the borderless window.
 				PixelSize size = RendererGridToPixelSize(renderer, renderer->grid_rows, renderer->grid_cols);
 				SetWindowPos(renderer->hwnd, HWND_TOP, 0, 0, size.width, size.height, SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED);
 			}
