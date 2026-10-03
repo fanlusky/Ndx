@@ -1,63 +1,85 @@
 # Ndx
 
-Ndx is a fork of [Nvy](https://github.com/RMichelsen/Nvy) by Rasmus Ishøy Michelsen, a minimal
-[Neovim](https://neovim.io/) client for Windows written in C++. All credit for the original client goes to
-its author and contributors; it is distributed under the MIT license, see [LICENSE](LICENSE).
+[简体中文](README.zh-CN.md)
 
-Changes compared to Nvy:
+Ndx is a native Windows graphical client for [Neovim](https://neovim.io/), written in C++20. It renders Neovim's UI with DirectWrite and Direct2D and adds Windows-focused features such as TSF input method support, font fallback lists, and optional cursor and scrolling animations.
 
-- IME support through the
-  [Text Services Framework (TSF)](https://learn.microsoft.com/en-us/windows/win32/tsf/text-services-framework)
-  instead of IMM32, see [Input Method (TSF)](#input-method-tsf)
-- `guifont` accepts a comma separated list of fonts, the extra fonts are used for glyphs missing from
-  the main font (e.g. Nerd Font icons, CJK characters)
-- Optional [neovide](https://github.com/neovide/neovide) style animations: an animated cursor with particle effects,
-  smooth scrolling and a fading cursor blink, see [Animations](#animations)
-- The default window is 2/3 as wide
-- The executable is `Ndx.exe` and the global vim variable is `g:ndx` (instead of `g:nvy`)
+Ndx is a personal project based on the earlier Nvy codebase. Its history and the point where Ndx-specific development began are documented at the end of this README.
 
-Like Nvy, Ndx uses DirectWrite to shape and render the grid cells and text.\
-Since Ndx is just a front-end for Neovim, installing Neovim is required to use Ndx, preferably the
-latest nightly version from [here](https://github.com/neovim/neovim/releases).
+## Demo
 
-![Showcase image](resources/client.png)
+<!-- Place the recorded demonstration at assets/ndx-demo.mp4. -->
 
-## Configuration
+[Open the Ndx demo video](assets/ndx-demo.mp4)
 
-Ndx sets the global vim variable `g:ndx = 1` in case you want to specialize your init.vim while using Ndx.
+## Features
 
-Fonts can be changed by setting the guifont in `init.vim`, for example:
-`set guifont=Fira\ Code:h24`. <br>
-If no font size is given, the current size is kept. <br>
-Several fonts can be listed, separated by commas. The first one which is installed is the main font, the
-following ones are used for glyphs the main font doesn't have, then the system fallback fonts. For example,
-with icons from a Nerd Font and Chinese characters from Source Han Sans:
-`set guifont=CaskaydiaCove\ Nerd\ Font,Source\ Han\ Sans\ SC:h12`, or in Lua
-`vim.opt.guifont = { "CaskaydiaCove Nerd Font", "Source Han Sans SC", ":h12" }`. <br>
-The Nvy syntax `set guifont=Fira\ Code:h24:Consolas` still works, Consolas being one more font of the list.
+- Native Windows rendering with DirectWrite and Direct2D
+- Text Services Framework (TSF) support for IMEs, including inline composition text and a cursor-following candidate window
+- Comma-separated `guifont` font lists, with fallback fonts for missing glyphs
+- Optional animated cursor, cursor effects, smooth scrolling, and smooth cursor blinking
+- Alt+Enter to toggle fullscreen; Ctrl+mouse wheel to zoom
+- Drag and drop files to open them; hold Ctrl while dropping to open them in a new window
+- Command-line options for window placement, geometry, fonts, and the Neovim executable
 
-Ndx can be started with the following flags:
-- `--maximize` to start in maximized
-- `--fullscreen` to start in fullscreen
-- `--position=<x>,<y>` to start with a given position, e.g. `--position=500,200`
-- `--geometry=<cols>x<rows>` to start with a given number of rows and columns, e.g. `--geometry=80x25`
-- `--disable-ligatures` to disable font ligatures
-- `--disable-fullscreen` to disable toggling fullscreen with Alt+Enter
-- `--linespace-factor=<float>` to scale the line spacing by a floating point factor, e.g. `--linespace-factor=1.2`
-- `--cursor-timeout=<int>` to hide the cursor after some time (in ms) of being idle, e.g. `--cursor-timeout=2000`
-- `--neovim-bin=<path>` to provide path to nvim.exe, e.g. `--neovim-bin="C:\neovim\nvim-win64\bin\nvim.exe"`
+## Requirements
 
-## Extra Features
+- Windows
+- Neovim (`nvim.exe`), preferably a recent release
+- To build: Visual Studio with the C++ workload, CMake, Ninja, and a recent Windows SDK
 
-- You can use Alt+Enter to toggle fullscreen
-- You can use Ctrl+Mousewheel to zoom
-- You can drag files onto Ndx to open them (:e)
-- Dragging files while holding Ctrl opens them in a new window (:new)
+## Build
 
-## Animations
+From PowerShell:
 
-Ndx can animate the cursor, draw particle effects behind it and scroll smoothly like neovide, rendered with
-Direct2D. The animations are off by default and turned on with global variables, which can be changed at any time:
+```powershell
+git clone https://github.com/fanlusky/Ndx.git
+cd Ndx
+.\scripts\build.ps1                    # Release -> build\release\Ndx.exe
+.\scripts\build.ps1 -Config Debug      # Debug -> build\debug\Ndx.exe
+.\scripts\build.ps1 -Clean -Run        # Clean build, then launch
+```
+
+The script enters the MSVC x64 developer environment when needed. You can also configure and build with CMake and Ninja directly:
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+## Usage and configuration
+
+Ndx starts Neovim as its editing backend. It sets `g:ndx = 1`, which you can use to customize your Neovim configuration when running inside Ndx.
+
+Set the font in your Neovim configuration, for example:
+
+```vim
+set guifont=CaskaydiaCove\ Nerd\ Font,Source\ Han\ Sans\ SC:h12
+```
+
+The first installed font is used as the main font; later fonts provide glyph fallback. The font size can be specified with `:h12`. The Lua equivalent is:
+
+```lua
+vim.opt.guifont = { "CaskaydiaCove Nerd Font", "Source Han Sans SC", ":h12" }
+```
+
+Available command-line options:
+
+| Option | Description |
+| --- | --- |
+| `--maximize` | Start maximized |
+| `--fullscreen` | Start fullscreen |
+| `--position=<x>,<y>` | Set the initial window position, for example `--position=500,200` |
+| `--geometry=<cols>x<rows>` | Set the initial grid size, for example `--geometry=80x25` |
+| `--disable-ligatures` | Disable font ligatures |
+| `--disable-fullscreen` | Disable the Alt+Enter fullscreen toggle |
+| `--linespace-factor=<float>` | Set line spacing, for example `--linespace-factor=1.2` |
+| `--cursor-timeout=<int>` | Hide the cursor after the given idle time in milliseconds |
+| `--neovim-bin=<path>` | Use a specific `nvim.exe` path |
+
+## Optional animations
+
+Animations are off by default. Enable them in your Neovim Lua configuration:
 
 ```lua
 vim.g.ndx_cursor_animation = true
@@ -65,88 +87,12 @@ vim.g.ndx_cursor_vfx_mode = "railgun" -- or a list, e.g. { "railgun", "sonicboom
 vim.g.ndx_scroll_animation = true
 ```
 
-The settings are the ones of neovide with an `ndx_` prefix instead of `neovide_`, unsetting a variable restores
-its default:
+Ndx supports cursor movement animation, cursor particle effects, smooth cursor blinking, and smooth scrolling. The settings use the corresponding Neovide names with an `ndx_` prefix. For example, `g:ndx_cursor_animation_length` controls cursor movement duration and `g:ndx_scroll_animation_length` controls scroll duration. Unset settings use their defaults. Smooth scrolling follows Neovim window scroll events; moving floating windows are not animated.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `g:ndx_cursor_animation` | `v:false` | Turns the cursor animation and the effects on |
-| `g:ndx_cursor_animation_length` | `0.15` | Time in seconds the cursor takes to reach its destination |
-| `g:ndx_cursor_short_animation_length` | `0.04` | Same for moves of up to two characters, e.g. while typing |
-| `g:ndx_cursor_trail_size` | `1.0` | How much the back of the cursor lags behind, from `0.0` to `1.0` |
-| `g:ndx_cursor_animate_in_insert_mode` | `v:true` | Animate the cursor in insert mode |
-| `g:ndx_cursor_animate_command_line` | `v:true` | Animate the cursor going to and from the command line |
-| `g:ndx_cursor_antialiasing` | `v:true` | Antialias the edges of the cursor |
-| `g:ndx_cursor_unfocused_outline_width` | `0.125` | Width of the outline drawn while unfocused, relative to the font size |
-| `g:ndx_cursor_smooth_blink` | `v:false` | Fade the cursor in and out when it blinks |
-| `g:ndx_cursor_vfx_mode` | `""` | `railgun`, `torpedo`, `pixiedust`, `sonicboom`, `ripple` or `wireframe`, or a list of them |
-| `g:ndx_cursor_vfx_opacity` | `200.0` | Opacity of the particles, from `0` to `255` |
-| `g:ndx_cursor_vfx_particle_lifetime` | `0.5` | Seconds a trail particle lives |
-| `g:ndx_cursor_vfx_particle_highlight_lifetime` | `0.2` | Seconds a `sonicboom`, `ripple` or `wireframe` lasts |
-| `g:ndx_cursor_vfx_particle_density` | `0.7` | Number of trail particles per cell the cursor travels |
-| `g:ndx_cursor_vfx_particle_speed` | `10.0` | Speed of the trail particles |
-| `g:ndx_cursor_vfx_particle_phase` | `1.5` | Wave length of the `railgun` particles |
-| `g:ndx_cursor_vfx_particle_curl` | `1.0` | How much the trail particles curl |
-| `g:ndx_scroll_animation` | `v:false` | Turns smooth scrolling on |
-| `g:ndx_scroll_animation_length` | `0.3` | Time in seconds a scroll takes |
-| `g:ndx_scroll_animation_far_lines` | `1` | Rows a jump further than the window, e.g. `gg` or `G`, is animated by |
+## License and project history
 
-With either animation turned on, the cursor also blinks as set with `blinkwait`, `blinkon` and `blinkoff` in
-`'guicursor'`, which Ndx otherwise ignores.
+Ndx retains the original project's MIT license and copyright notice; see [LICENSE](LICENSE). The upstream project that this codebase builds on is [Nvy by Rasmus Ishøy Michelsen](https://github.com/RMichelsen/Nvy).
 
-Smooth scrolling animates every scroll of a window reported by Neovim's `WinScrolled` event, e.g. `j`/`k` at the
-window's edge, `<C-e>`, `<C-d>`, `zz` or the mouse wheel. Floating windows covering a window's top or bottom, like
-treesitter-context's, stay in place. Unlike neovide, Ndx doesn't use Neovim's multigrid UI, so moving floating
-windows aren't animated.
+Ndx-specific development began at commit [`3ffe894`](https://github.com/fanlusky/Ndx/commit/3ffe894e7e3c91cd408b3d265a89ff4ec93b337b), **“Replace IMM32 IME handling with TSF”**, whose parent is [`367190e`](https://github.com/fanlusky/Ndx/commit/367190ed748c189ee9f1d50c28569a6daa12b369). The project was renamed to Ndx in the following commit, [`7f5a7d6`](https://github.com/fanlusky/Ndx/commit/7f5a7d611b5c872e216bb1dd74e53b35971c393a), **“Rename to Ndx, support guifont font lists, fix startup with file arguments.”**
 
-Wrapped lines, including partially visible lines with `'smoothscroll'`, are animated by their screen-row displacement.
-
-While animating, frames are drawn at the display refresh rate. Once everything has settled, Ndx goes back to only
-drawing when Neovim updates the screen.
-## Input Method (TSF)
-
-Ndx is a TSF-aware application, input methods (e.g. Microsoft Pinyin, Japanese IME) talk to it through TSF:
-
-- The composition string is drawn inline at the cursor, using the underline style (solid, dotted, dashed,
-  squiggle, bold) and colors declared by the input method's display attributes
-- The candidate window follows the cursor, including in the command line
-- Committed text is sent to Neovim as soon as the input method finalizes it
-- Clicking with the mouse commits the current composition first
-
-## Releases
-
-Releases of the original Nvy can be found [here](https://github.com/RMichelsen/Nvy/releases)
-
-## Build
-
-### Requirements
-
-- A compiler supporting `C++20`
-- [The latest Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk/)
-
-Apart from the Windows SDK, the only dependency Ndx uses is the excellent [MPack](https://github.com/ludocode/mpack) library
-which is compiled alongside the client itself.
-
-### Build with the PowerShell script
-
-Requires Visual Studio with the C++ workload, [CMake](https://cmake.org/) and [Ninja](https://ninja-build.org/).
-The script sets up the MSVC x64 environment by itself.
-
-```powershell
-git clone https://github.com/fanlusky/Ndx.git
-cd Ndx
-.\scripts\build.ps1                    # Release -> build\release\Ndx.exe
-.\scripts\build.ps1 -Config Debug      # Debug   -> build\debug\Ndx.exe
-.\scripts\build.ps1 -Clean -Run        # Rebuild from scratch, then launch
-```
-
-### Build example with [Ninja](https://ninja-build.org/)
-
-```sh
-git clone https://github.com/fanlusky/Ndx.git
-cd Ndx
-mkdir build
-cd build
-cmake .. -GNinja
-ninja
-```
+Original project reference: [RMichelsen/Nvy](https://github.com/RMichelsen/Nvy).
