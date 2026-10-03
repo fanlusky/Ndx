@@ -3,6 +3,9 @@
 #include "renderer/glyph_renderer.h"
 #include "renderer/scroll_animation.h"
 
+constexpr float DEFAULT_NEON_RADIUS = 4.0f;
+constexpr float DEFAULT_NEON_INTENSITY = 1.0f;
+
 void ResetLineLayouts(Renderer *renderer) {
 	for (LineLayoutEntry &entry : renderer->line_layouts) {
 		SafeRelease(&entry.layout);
@@ -81,6 +84,7 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 	// Recreated with the new size on the next draw
 	SafeRelease(&renderer->d2d_grid_bitmap);
 	SafeRelease(&renderer->d2d_neon_bitmap);
+	SafeRelease(&renderer->d2d_neon_gain);
 	SafeRelease(&renderer->d2d_neon_blur_near);
 	SafeRelease(&renderer->d2d_neon_blur_far);
 	ScrollAnimationReset(renderer->scroll_animation);
@@ -173,6 +177,7 @@ void HandleDeviceLost(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
 	SafeRelease(&renderer->d2d_neon_bitmap);
+	SafeRelease(&renderer->d2d_neon_gain);
 	SafeRelease(&renderer->d2d_neon_blur_near);
 	SafeRelease(&renderer->d2d_neon_blur_far);
 	ScrollAnimationReleaseResources(renderer->scroll_animation);
@@ -230,6 +235,8 @@ void InitializeLocale(Renderer *renderer) {
 
 void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, float linespace_factor, float monitor_dpi) {
 	renderer->hwnd = hwnd;
+	renderer->neon_radius = DEFAULT_NEON_RADIUS;
+	renderer->neon_intensity = DEFAULT_NEON_INTENSITY;
 	renderer->disable_ligatures = disable_ligatures;
 	renderer->linespace_factor = linespace_factor;
 
@@ -285,6 +292,7 @@ void RendererShutdown(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
 	SafeRelease(&renderer->d2d_neon_bitmap);
+	SafeRelease(&renderer->d2d_neon_gain);
 	SafeRelease(&renderer->d2d_neon_blur_near);
 	SafeRelease(&renderer->d2d_neon_blur_far);
 	SafeRelease(&renderer->d2d_background_rect_brush);
@@ -884,6 +892,23 @@ void DrawDirtyGridLines(Renderer *renderer) {
 	renderer->draws_invalidated = false;
 }
 
+void UpdateNeonEffects(Renderer *renderer) {
+	if (!renderer->d2d_neon_gain) return;
+	float intensity = renderer->neon_intensity;
+	D2D1_MATRIX_5X4_F gain {
+		intensity, 0, 0, 0,
+		0, intensity, 0, 0,
+		0, 0, intensity, 0,
+		0, 0, 0, intensity,
+		0, 0, 0, 0
+	};
+	WIN_CHECK(renderer->d2d_neon_gain->SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX, gain));
+	WIN_CHECK(renderer->d2d_neon_blur_near->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+		renderer->neon_radius * 0.5f));
+	WIN_CHECK(renderer->d2d_neon_blur_far->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+		renderer->neon_radius));
+}
+
 void CreateNeonResources(Renderer *renderer) {
 	D2D1_BITMAP_PROPERTIES1 properties {
 		.pixelFormat = D2D1_PIXEL_FORMAT {
@@ -899,12 +924,13 @@ void CreateNeonResources(Renderer *renderer) {
 		.height = max(renderer->pixel_size.height, 1u)
 	};
 	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_bitmap));
+	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1ColorMatrix, &renderer->d2d_neon_gain));
 	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1GaussianBlur, &renderer->d2d_neon_blur_near));
 	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1GaussianBlur, &renderer->d2d_neon_blur_far));
-	renderer->d2d_neon_blur_near->SetInput(0, renderer->d2d_neon_bitmap);
-	renderer->d2d_neon_blur_far->SetInput(0, renderer->d2d_neon_bitmap);
-	WIN_CHECK(renderer->d2d_neon_blur_near->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, 2.0f));
-	WIN_CHECK(renderer->d2d_neon_blur_far->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, 4.0f));
+	renderer->d2d_neon_gain->SetInput(0, renderer->d2d_neon_bitmap);
+	renderer->d2d_neon_blur_near->SetInputEffect(0, renderer->d2d_neon_gain);
+	renderer->d2d_neon_blur_far->SetInputEffect(0, renderer->d2d_neon_gain);
+	UpdateNeonEffects(renderer);
 }
 
 void DrawNeonGlow(Renderer *renderer) {
@@ -2282,9 +2308,30 @@ void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpac
 			renderer->draws_invalidated = true;
 			if (!enabled) {
 				SafeRelease(&renderer->d2d_neon_bitmap);
+				SafeRelease(&renderer->d2d_neon_gain);
 				SafeRelease(&renderer->d2d_neon_blur_near);
 				SafeRelease(&renderer->d2d_neon_blur_far);
 			}
+		}
+		known = true;
+	}
+	else if (length == strlen("ndx_neon_radius") && !strncmp(name, "ndx_neon_radius", length)) {
+		float radius = NodeToFloat(value, DEFAULT_NEON_RADIUS);
+		radius = std::isfinite(radius) ? max(0.5f, min(radius, 40.0f)) : DEFAULT_NEON_RADIUS;
+		if (radius != renderer->neon_radius) {
+			renderer->neon_radius = radius;
+			renderer->draws_invalidated = true;
+			UpdateNeonEffects(renderer);
+		}
+		known = true;
+	}
+	else if (length == strlen("ndx_neon_intensity") && !strncmp(name, "ndx_neon_intensity", length)) {
+		float intensity = NodeToFloat(value, DEFAULT_NEON_INTENSITY);
+		intensity = std::isfinite(intensity) ? max(0.0f, min(intensity, 2.0f)) : DEFAULT_NEON_INTENSITY;
+		if (intensity != renderer->neon_intensity) {
+			renderer->neon_intensity = intensity;
+			renderer->draws_invalidated = true;
+			UpdateNeonEffects(renderer);
 		}
 		known = true;
 	}
