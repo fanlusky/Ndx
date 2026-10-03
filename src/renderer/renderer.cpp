@@ -934,11 +934,14 @@ void CreateNeonResources(Renderer *renderer) {
 }
 
 void DrawNeonGlow(Renderer *renderer) {
-	// Draw the blurred copies over the sharp grid text, as in NeonWindow.
+	// Blur the text into the surrounding background, then restore the sharp
+	// foreground on top so the glow cannot wash out syntax highlight colors.
 	renderer->d2d_context->DrawImage(renderer->d2d_neon_blur_far, nullptr, nullptr,
 		D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_PLUS);
 	renderer->d2d_context->DrawImage(renderer->d2d_neon_blur_near, nullptr, nullptr,
 		D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_PLUS);
+	renderer->d2d_context->DrawImage(renderer->d2d_neon_bitmap, nullptr, nullptr,
+		D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
 }
 
 bool IsSurrogatePair(wchar_t left, wchar_t right) {
