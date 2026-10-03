@@ -8,9 +8,7 @@ Ndx is a personal project based on the earlier Nvy codebase. Its history and the
 
 ## Demo
 
-<!-- Place the recorded demonstration at assets/ndx-demo.mp4. -->
-
-[Open the Ndx demo video](assets/ndx-demo.mp4)
+https://github.com/user-attachments/assets/3d2d0769-f280-46a9-afdd-c4c6d9838f6c
 
 ## Features
 
