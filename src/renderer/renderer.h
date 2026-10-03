@@ -135,7 +135,10 @@ struct Renderer {
 	LARGE_INTEGER performance_frequency;
 	ID2D1Bitmap1 *d2d_grid_bitmap;
 	bool neon_text;
+	float neon_radius;
+	float neon_intensity;
 	ID2D1Bitmap1 *d2d_neon_bitmap;
+	ID2D1Effect *d2d_neon_gain;
 	ID2D1Effect *d2d_neon_blur_near;
 	ID2D1Effect *d2d_neon_blur_far;
 	bool window_focused;
@@ -248,7 +251,7 @@ void RendererSetComposition(Renderer *renderer, const wchar_t *text, uint32_t le
 // Client rect of [start, end) of a composition string as it would be drawn at the cursor
 RECT RendererGetCompositionTextRect(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t start, uint32_t end);
 
-// Applies a g:ndx_neon_text, g:ndx_cursor_* or g:ndx_scroll_* variable, see CursorAnimationSetOption
+// Applies a g:ndx_neon_*, g:ndx_cursor_* or g:ndx_scroll_* variable, see CursorAnimationSetOption
 // and ScrollAnimationSetOption
 void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value);
 void RendererSetFocus(Renderer *renderer, bool focused);

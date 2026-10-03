@@ -84,11 +84,14 @@ vim.g.ndx_cursor_animation = true
 vim.g.ndx_cursor_vfx_mode = "railgun" -- or a list, e.g. { "railgun", "sonicboom" }
 vim.g.ndx_scroll_animation = true
 vim.g.ndx_neon_text = true -- glow around text; disabled by default
+vim.g.ndx_neon_radius = 4.0 -- outer glow radius in pixels (0.5–40)
+vim.g.ndx_neon_intensity = 1.0 -- glow strength (0–2)
 ```
 
 Ndx supports cursor movement animation, cursor particle effects, smooth cursor blinking, and smooth scrolling. The settings use the corresponding Neovide names with an `ndx_` prefix. For example, `g:ndx_cursor_animation_length` controls cursor movement duration and `g:ndx_scroll_animation_length` controls scroll duration. Unset settings use their defaults. Smooth scrolling follows Neovim window scroll events; moving floating windows are not animated.
 
 Set `g:ndx_neon_text` to `true` or `false` to toggle the text glow while Ndx is running. It is off by default.
+`g:ndx_neon_radius` controls the blur range in pixels (default `4.0`); `g:ndx_neon_intensity` controls brightness (default `1.0`, with `0` removing the glow). Both can be changed while Ndx is running; out-of-range values are clamped.
 
 ## License and project history
 
