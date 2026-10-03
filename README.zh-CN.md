@@ -77,7 +77,7 @@ vim.opt.guifont = { "CaskaydiaCove Nerd Font", "Source Han Sans SC", ":h12" }
 | `--cursor-timeout=<int>` | 光标空闲指定毫秒数后隐藏 |
 | `--neovim-bin=<path>` | 指定 `nvim.exe` 的路径 |
 
-## 可选动画
+## 可选动画与文字光晕
 
 动画默认关闭。可在 Neovim 的 Lua 配置中启用：
 
@@ -85,9 +85,12 @@ vim.opt.guifont = { "CaskaydiaCove Nerd Font", "Source Han Sans SC", ":h12" }
 vim.g.ndx_cursor_animation = true
 vim.g.ndx_cursor_vfx_mode = "railgun" -- 也可以传入列表，例如 { "railgun", "sonicboom" }
 vim.g.ndx_scroll_animation = true
+vim.g.ndx_neon_text = true -- 文字霓虹光晕，默认关闭
 ```
 
 Ndx 支持光标移动动画、光标粒子特效、平滑闪烁和平滑滚动。相关设置沿用 Neovide 的名称，并使用 `ndx_` 前缀。例如，`g:ndx_cursor_animation_length` 控制光标移动时长，`g:ndx_scroll_animation_length` 控制滚动时长。未设置的选项使用默认值。平滑滚动根据 Neovim 的窗口滚动事件执行；浮动窗口移动时不会播放动画。
+
+设置 `g:ndx_neon_text` 为 `true` 或 `false` 可在运行时开关文字霓虹光晕，默认关闭。
 
 ## 许可证与项目来源
 
