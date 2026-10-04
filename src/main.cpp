@@ -1,3 +1,4 @@
+#include "config/config.h"
 #include "nvim/nvim.h"
 #include "renderer/renderer.h"
 #include "tsf/tsf.h"
@@ -527,8 +528,22 @@ BOOL ShouldUseDarkMode()
 int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _In_ LPWSTR p_cmd_line, _In_ int n_cmd_show) {
 	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
 
-	int n_args;
-	LPWSTR *cmd_line_args = CommandLineToArgvW(GetCommandLineW(), &n_args);
+	int n_system_args;
+	LPWSTR *system_args = CommandLineToArgvW(GetCommandLineW(), &n_system_args);
+
+	// The options from config.toml come first, so the actual arguments take precedence
+	ConfigArgs config {};
+	ConfigLoad(&config);
+	int n_args = n_system_args + config.count;
+	LPWSTR *cmd_line_args = static_cast<LPWSTR *>(malloc(n_args * sizeof(LPWSTR)));
+	cmd_line_args[0] = system_args[0];
+	for (int i = 0; i < config.count; ++i) {
+		cmd_line_args[1 + i] = config.args[i];
+	}
+	for (int i = 1; i < n_system_args; ++i) {
+		cmd_line_args[config.count + i] = system_args[i];
+	}
+
 	bool start_maximized = false;
 	bool start_fullscreen = false;
 	bool start_centered = false;
@@ -581,11 +596,15 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 			start_cols = wcstol(&cmd_line_args[i][11], &end_ptr, 10);
 			start_rows = wcstol(end_ptr + 1, nullptr, 10);
 		}
+		// The last position wins, so the command line overrides config.toml
 		else if(!wcscmp(cmd_line_args[i], L"--position=center")) {
 			start_centered = true;
+			start_pos_x = CW_USEDEFAULT;
+			start_pos_y = CW_USEDEFAULT;
 		}
 		else if(!wcsncmp(cmd_line_args[i], L"--position=", wcslen(L"--position="))) {
 			wchar_t *end_ptr;
+			start_centered = false;
 			start_pos_x = wcstol(&cmd_line_args[i][11], &end_ptr, 10);
 			start_pos_y = wcstol(end_ptr + 1, nullptr, 10);
 		}
@@ -627,6 +646,9 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 			}
 		}
 	}
+	free(cmd_line_args);
+	ConfigFree(&config);
+	LocalFree(system_args);
 
 	const wchar_t *window_class_name = L"Ndx_Class";
 	const wchar_t *window_title = L"Ndx";

@@ -78,6 +78,24 @@ vim.opt.guifont = { "CaskaydiaCove Nerd Font", "Source Han Sans SC", ":h12" }
 | `--cursor-timeout=<int>` | 光标空闲指定毫秒数后隐藏 |
 | `--neovim-bin=<path>` | 指定 `nvim.exe` 的路径 |
 
+## 配置文件
+
+上述命令行参数也可以写在 `%LOCALAPPDATA%\Ndx\config.toml` 中，Ndx 启动时会读取它。命令行参数优先于配置文件。
+
+```toml
+position = "center"          # 或 "500,200"
+geometry = "100x30"          # <列数>x<行数>
+maximize = false
+fullscreen = false
+disable_ligatures = false
+disable_fullscreen = false
+linespace_factor = 1.2
+cursor_timeout = 3000        # 毫秒，0 表示关闭
+neovim_bin = 'C:\Program Files\Neovim\bin\nvim.exe'
+```
+
+只支持顶层的 `key = value` 行，值可以是字符串、数字和布尔值。Windows 路径请用单引号，或在双引号中把反斜杠写成两个，因为 `"C:\nvim"` 中的 `\n` 会被当成换行。未知选项、无效值等问题会在启动时用对话框列出，其余选项照常生效。
+
 ## 可选动画与文字光晕
 
 动画默认关闭。可在 Neovim 的 Lua 配置中启用：
