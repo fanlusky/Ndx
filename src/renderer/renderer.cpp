@@ -3,8 +3,8 @@
 #include "renderer/glyph_renderer.h"
 #include "renderer/scroll_animation.h"
 
-constexpr float DEFAULT_NEON_RADIUS = 14.0f;
-constexpr float DEFAULT_NEON_INTENSITY = 0.45f;
+constexpr float DEFAULT_NEON_RADIUS = 7.0f;
+constexpr float DEFAULT_NEON_INTENSITY = 0.2f;
 
 void ReleaseNeonResources(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_neon_bitmap);
@@ -954,8 +954,8 @@ void CreateNeonResources(Renderer *renderer) {
 	ID2D1Effect *base = CreateNeonGammaEffect(renderer, NEON_GAMMA);
 	base->SetInput(0, renderer->d2d_neon_base_bitmap);
 
-	// A wide, faint aura behind the text, like the glow of Godot used by GriddyCode. A narrow
-	// glow lies on the glyphs and fills the gaps between them, the text looks smeared then.
+	// A faint aura following the text, like the glow of Godot used by GriddyCode. A narrow glow
+	// lies on the glyphs and smears them, a wide one pools into blobs of color around the words.
 	renderer->d2d_neon_blur = CreateNeonEffect(renderer, CLSID_D2D1GaussianBlur);
 	renderer->d2d_neon_blur->SetInputEffect(0, text);
 
