@@ -3,8 +3,8 @@
 #include "renderer/glyph_renderer.h"
 #include "renderer/scroll_animation.h"
 
-constexpr float DEFAULT_NEON_RADIUS = 4.0f;
-constexpr float DEFAULT_NEON_INTENSITY = 1.5f;
+constexpr float DEFAULT_NEON_RADIUS = 10.0f;
+constexpr float DEFAULT_NEON_INTENSITY = 0.5f;
 
 void ReleaseNeonResources(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_neon_bitmap);
@@ -900,19 +900,20 @@ void DrawDirtyGridLines(Renderer *renderer) {
 	renderer->draws_invalidated = false;
 }
 
-// The glow is a tight halo hugging the text and a wide, faint one around it, like the
-// glow levels of Godot used by GriddyCode. The far blur is this much wider than the near one.
-constexpr float NEON_FAR_RADIUS_SCALE = 3.0f;
-constexpr float NEON_NEAR_WEIGHT = 0.6f;
-constexpr float NEON_FAR_WEIGHT = 0.4f;
+// The glow is mostly a wide, faint aura behind the text, like the glow levels of Godot used by
+// GriddyCode, with a little of a narrower one to lift the words. A strong glow close to the
+// glyphs fills the gaps between them and looks smeared at text sizes.
+constexpr float NEON_NEAR_RADIUS_SCALE = 0.3f;
+constexpr float NEON_NEAR_WEIGHT = 0.15f;
+constexpr float NEON_FAR_WEIGHT = 0.85f;
 constexpr float NEON_GAMMA = 2.2f;
 
 void UpdateNeonEffects(Renderer *renderer) {
 	if (!renderer->d2d_neon_sum) return;
 	WIN_CHECK(renderer->d2d_neon_blur_near->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-		renderer->neon_radius));
+		renderer->neon_radius * NEON_NEAR_RADIUS_SCALE));
 	WIN_CHECK(renderer->d2d_neon_blur_far->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-		renderer->neon_radius * NEON_FAR_RADIUS_SCALE));
+		renderer->neon_radius));
 	// The grid plus the glow, saturating like Godot's linear tonemapping
 	WIN_CHECK(renderer->d2d_neon_sum->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS,
 		D2D1::Vector4F(0.0f, 1.0f, renderer->neon_intensity, 0.0f)));
