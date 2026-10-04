@@ -2,6 +2,10 @@
 #include "renderer/renderer.h"
 
 constexpr float PI = 3.14159265358979f;
+// Fewest particles spawned by a cursor move outside of insert mode
+constexpr int MIN_BURST_PARTICLES = 6;
+// Shortest move getting the burst, in cell heights
+constexpr float MIN_BURST_TRAVEL_CELLS = 0.1f;
 
 constexpr CursorAnimationSettings DEFAULT_SETTINGS {
 	.enabled = false,
@@ -458,10 +462,31 @@ bool TrailUpdate(CursorVfx *vfx, const CursorAnimationSettings *settings, const 
 			float travel_distance = sqrtf(travel_x * travel_x + travel_y * travel_y);
 			float travel_cells = travel_distance / target->height;
 
-			// More particles the further the cursor travels
+			// More particles the further the cursor travels. With a high density a long move asks for
+			// more than fit, only spawning the first ones would leave the faintest, shortest lived
+			// ones. Instead the whole range of lifetimes is spread over the particles that fit.
 			float particle_count_f = travel_cells * settings->vfx_particle_density + vfx->count_remainder;
-			int particle_count = static_cast<int>(particle_count_f);
-			vfx->count_remainder = particle_count_f - particle_count;
+			int particle_count;
+			if (particle_count_f >= MAX_CURSOR_PARTICLES) {
+				particle_count = MAX_CURSOR_PARTICLES;
+				vfx->count_remainder = 0.0f;
+			}
+			else {
+				particle_count = static_cast<int>(particle_count_f);
+				vfx->count_remainder = particle_count_f - particle_count;
+			}
+
+			// Moves of a line or a few characters travel too little for even one particle,
+			// so every move outside of insert mode gets at least a small burst. Tiny moves
+			// are left out, those are only rounding errors while following the scrolling text.
+			if (!target->insert_mode && settings->vfx_particle_density > 0.0f &&
+				travel_cells >= MIN_BURST_TRAVEL_CELLS && particle_count < MIN_BURST_PARTICLES) {
+				particle_count = MIN_BURST_PARTICLES;
+				vfx->count_remainder = 0.0f;
+			}
+
+			// The new particles always fit, the old ones fading out make room for them
+			vfx->particle_count = min(vfx->particle_count, MAX_CURSOR_PARTICLES - particle_count);
 
 			float travel_direction_x = travel_x;
 			float travel_direction_y = travel_y;
