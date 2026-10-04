@@ -22,6 +22,9 @@ struct CursorAnimationSettings {
 	bool enabled;
 	float animation_length;
 	float short_animation_length;
+	// Length of every cursor move outside of insert mode, short ones included.
+	// Negative when unset, animation_length and short_animation_length are used then.
+	float normal_mode_animation_length;
 	float trail_size;
 	bool animate_in_insert_mode;
 	// When false, the cursor glides without a trail or particle effects in insert mode

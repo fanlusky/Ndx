@@ -124,6 +124,8 @@ Ndx supports cursor movement animation, cursor particle effects, smooth cursor b
 
 Set `g:ndx_cursor_trail_in_insert_mode` to `false` to keep only a plain smooth cursor glide while typing, like the smooth caret in Word: in insert mode the cursor moves without stretching into a trail and no particle effects are shown. Normal mode keeps the full animation. It is `true` by default. Typing moves of up to two characters use `g:ndx_cursor_short_animation_length` (default `0.04`); raise it, for example to `0.08`, for a more visible glide.
 
+`g:ndx_cursor_normal_mode_animation_length` sets the cursor movement duration, in seconds, outside of insert mode (normal, visual and so on), for example `vim.g.ndx_cursor_normal_mode_animation_length = 0.3`. It also applies to short moves of up to two characters such as `h` and `l`, which then no longer use `g:ndx_cursor_short_animation_length`. When unset (or set to a negative value or `nil`), `g:ndx_cursor_animation_length` is used. It can be changed at runtime.
+
 Set `g:ndx_neon_text` to `true` or `false` to toggle the text glow while Ndx is running. It is off by default. Like the glow in GriddyCode, each piece of text gets a soft aura in its own color, added to the background in linear light. The text itself stays sharp and keeps its colors.
 `g:ndx_neon_radius` is the blur radius of the aura in pixels (default `7.0`); small values smear the glyphs, large ones pool into blobs of color. `g:ndx_neon_intensity` controls brightness (default `0.2`, with `0` removing the glow). Both can be changed while Ndx is running; out-of-range values are clamped.
 
