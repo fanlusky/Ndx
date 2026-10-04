@@ -24,6 +24,8 @@ struct CursorAnimationSettings {
 	float short_animation_length;
 	float trail_size;
 	bool animate_in_insert_mode;
+	// When false, the cursor glides without a trail or particle effects in insert mode
+	bool trail_in_insert_mode;
 	bool animate_command_line;
 	bool antialiasing;
 	float unfocused_outline_width;
@@ -131,6 +133,7 @@ struct CursorAnimationTarget {
 	// Fraction of the cell covered by a vertical or horizontal cursor
 	float cell_percentage;
 	bool immediate;
+	bool insert_mode;
 	// How far the text under the cursor scrolled since the last update, the
 	// cursor moves along with it instead of animating towards it
 	float scroll_delta_y;
@@ -150,6 +153,7 @@ struct CursorAnimation {
 	float destination_x;
 	float destination_y;
 	CursorShape shape;
+	float cell_percentage;
 };
 
 // Option values from nvim, the default is used for nil and other unexpected types

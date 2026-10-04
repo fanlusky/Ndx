@@ -9,6 +9,7 @@ constexpr CursorAnimationSettings DEFAULT_SETTINGS {
 	.short_animation_length = 0.04f,
 	.trail_size = 1.0f,
 	.animate_in_insert_mode = true,
+	.trail_in_insert_mode = true,
 	.animate_command_line = true,
 	.antialiasing = true,
 	.unfocused_outline_width = 1.0f / 8.0f,
@@ -267,6 +268,9 @@ bool CursorAnimationSetOption(CursorAnimation *animation, const char *name, size
 	else if (Matches("animate_in_insert_mode")) {
 		settings->animate_in_insert_mode = NodeToBool(value, DEFAULT_SETTINGS.animate_in_insert_mode);
 	}
+	else if (Matches("trail_in_insert_mode")) {
+		settings->trail_in_insert_mode = NodeToBool(value, DEFAULT_SETTINGS.trail_in_insert_mode);
+	}
 	else if (Matches("animate_command_line")) {
 		settings->animate_command_line = NodeToBool(value, DEFAULT_SETTINGS.animate_command_line);
 	}
@@ -358,7 +362,7 @@ float CornerDirectionAlignment(const CursorCorner *corner, const CursorAnimation
 }
 
 void CornerJump(CursorCorner *corner, const CursorAnimationSettings *settings, const CursorAnimationTarget *target,
-	float center_x, float center_y, float alignment) {
+	float center_x, float center_y, float alignment, bool trail) {
 	float destination_x, destination_y;
 	CornerDestination(corner, target, center_x, center_y, &destination_x, &destination_y);
 	float jump_x = (destination_x - corner->previous_destination_x) / target->width;
@@ -367,6 +371,10 @@ void CornerJump(CursorCorner *corner, const CursorAnimationSettings *settings, c
 	if (fabsf(jump_x) <= 2.001f && fabsf(jump_y) <= 0.001f) {
 		// Short jumps of up to two characters, typically when typing in insert mode
 		corner->animation_length = min(settings->animation_length, settings->short_animation_length);
+	}
+	else if (!trail) {
+		// All corners move together, so the cursor glides without stretching
+		corner->animation_length = settings->animation_length;
 	}
 	else {
 		float leading = settings->animation_length * max(0.0f, min(1.0f - settings->trail_size, 1.0f));
@@ -423,7 +431,7 @@ bool HighlightUpdate(CursorVfx *vfx, const CursorAnimationSettings *settings, fl
 }
 
 bool TrailUpdate(CursorVfx *vfx, const CursorAnimationSettings *settings, const CursorAnimationTarget *target,
-	float center_x, float center_y, float dt) {
+	float center_x, float center_y, float dt, bool spawn) {
 	// Age the particles, removing the dead ones without keeping their order
 	for (int i = 0; i < vfx->particle_count;) {
 		CursorParticle *particle = &vfx->particles[i];
@@ -444,7 +452,7 @@ bool TrailUpdate(CursorVfx *vfx, const CursorAnimationSettings *settings, const 
 	}
 
 	if (center_x != vfx->previous_destination_x || center_y != vfx->previous_destination_y) {
-		if (!target->immediate) {
+		if (spawn) {
 			float travel_x = center_x - vfx->previous_destination_x;
 			float travel_y = center_y - vfx->previous_destination_y;
 			float travel_distance = sqrtf(travel_x * travel_x + travel_y * travel_y);
@@ -519,6 +527,8 @@ bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarg
 	float center_y = target->y + target->height * 0.5f;
 
 	bool immediate = target->immediate;
+	// Without the trail the cursor only glides, the particle effects aren't started either
+	bool trail = settings->trail_in_insert_mode || !target->insert_mode;
 
 	// Move along with the scrolling text, so scrolling isn't taken for a jump
 	if (target->scroll_delta_y != 0.0f && animation->initialized) {
@@ -540,6 +550,7 @@ bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarg
 		// Appear right at the destination instead of flying in from somewhere
 		animation->initialized = true;
 		animation->shape = target->shape;
+		animation->cell_percentage = target->cell_percentage;
 		SetCornerShape(animation, target->shape, target->cell_percentage);
 		for (int i = 0; i < 4; ++i) {
 			CursorCorner *corner = &animation->corners[i];
@@ -559,17 +570,23 @@ bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarg
 
 	if (target->shape != animation->shape) {
 		animation->shape = target->shape;
+		animation->cell_percentage = target->cell_percentage;
 		SetCornerShape(animation, target->shape, target->cell_percentage);
 		for (int i = 0; i < animation->vfx_count; ++i) {
 			CursorVfx *vfx = &animation->vfxs[i];
-			vfx->t = 0.0f;
+			if (trail) vfx->t = 0.0f;
 			vfx->count_remainder = 0.0f;
 		}
+	}
+	else if (target->cell_percentage != animation->cell_percentage) {
+		// The bars keep their width between narrow and wide cells
+		animation->cell_percentage = target->cell_percentage;
+		SetCornerShape(animation, target->shape, target->cell_percentage);
 	}
 
 	if (jumped) {
 		for (int i = 0; i < animation->vfx_count; ++i) {
-			if (IsHighlight(animation->vfxs[i].mode)) {
+			if (trail && IsHighlight(animation->vfxs[i].mode)) {
 				animation->vfxs[i].t = 0.0f;
 			}
 		}
@@ -585,7 +602,7 @@ bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarg
 		float range = max_alignment - min_alignment;
 		for (int i = 0; i < 4; ++i) {
 			float alignment = range > 0.0f ? max(0.0f, min((alignments[i] - min_alignment) / range, 1.0f)) : 1.0f;
-			CornerJump(&animation->corners[i], settings, target, center_x, center_y, alignment);
+			CornerJump(&animation->corners[i], settings, target, center_x, center_y, alignment, trail);
 		}
 	}
 
@@ -603,7 +620,7 @@ bool CursorAnimationUpdate(CursorAnimation *animation, const CursorAnimationTarg
 			animating |= HighlightUpdate(vfx, settings, center_x, center_y, dt);
 		}
 		else {
-			animating |= TrailUpdate(vfx, settings, target, center_x, center_y, dt);
+			animating |= TrailUpdate(vfx, settings, target, center_x, center_y, dt, trail && !immediate);
 		}
 	}
 

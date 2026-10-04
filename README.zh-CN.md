@@ -92,6 +92,8 @@ vim.g.ndx_neon_intensity = 1.0 -- 光晕强度（0–2）
 
 Ndx 支持光标移动动画、光标粒子特效、平滑闪烁和平滑滚动。相关设置沿用 Neovide 的名称，并使用 `ndx_` 前缀。例如，`g:ndx_cursor_animation_length` 控制光标移动时长，`g:ndx_scroll_animation_length` 控制滚动时长。未设置的选项使用默认值。平滑滚动根据 Neovim 的窗口滚动事件执行；浮动窗口移动时不会播放动画。
 
+将 `g:ndx_cursor_trail_in_insert_mode` 设为 `false` 后，打字时只保留平滑的光标移动，效果类似 Word 的平滑光标：insert 模式下光标移动不会拉出拖尾，也不显示粒子特效；普通模式仍保留完整动画。默认值为 `true`。打字时两个字符以内的移动使用 `g:ndx_cursor_short_animation_length`（默认 `0.04`），如需更明显的滑动效果，可调大到 `0.08` 等值。
+
 设置 `g:ndx_neon_text` 为 `true` 或 `false` 可在运行时开关文字霓虹光晕，默认关闭。
 `g:ndx_neon_radius` 控制模糊范围，默认 `4.0` 像素；`g:ndx_neon_intensity` 控制亮度，默认 `1.0`，设为 `0` 时没有光晕。两项都能在运行时调整，超出范围的值会被限制在允许范围内。
 

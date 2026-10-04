@@ -1157,14 +1157,18 @@ ID2D1PathGeometry *CreateUnfocusedOutline(Renderer *renderer, ID2D1PathGeometry 
 	return outline;
 }
 
+// The cell is null for the composition caret
 void DrawAnimatedCursor(Renderer *renderer, CursorCell *cell, const CursorAnimationTarget *target, float opacity) {
 	const CursorAnimation *animation = renderer->cursor_animation;
 	ID2D1DeviceContext4 *context = renderer->d2d_context;
 	if (opacity <= 0.0f) return;
 
-	// Snap the corners to whole pixels relative to the cell, so the resting cursor is crisp
-	float fract_x = target->x - floorf(target->x);
-	float fract_y = target->y - floorf(target->y);
+	// Snap the corners to whole pixels relative to the cell, so the resting cursor is crisp.
+	// The thin bar and underline cursors snap to whole device pixels instead, otherwise
+	// antialiasing spreads their 2 pixels over 3 and blends their color with the background.
+	bool thin = target->shape == CursorShape::Vertical || target->shape == CursorShape::Horizontal;
+	float fract_x = thin ? 0.0f : target->x - floorf(target->x);
+	float fract_y = thin ? 0.0f : target->y - floorf(target->y);
 	D2D1_POINT_2F points[4];
 	for (int i = 0; i < 4; ++i) {
 		points[i] = D2D1_POINT_2F {
@@ -1197,8 +1201,9 @@ void DrawAnimatedCursor(Renderer *renderer, CursorCell *cell, const CursorAnimat
 	context->FillGeometry(geometry, renderer->d2d_background_rect_brush);
 	context->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 
-	// The char under the cursor, in the cursor colors where the cursor covers it
-	if (target->shape != CursorShape::None) {
+	// The char under the cursor, in the cursor colors where the cursor covers it. The composition
+	// caret has no cell, the grid char is hidden under the composition string there.
+	if (cell && target->shape != CursorShape::None) {
 		context->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), geometry, antialias_mode), nullptr);
 		D2D1_RECT_F cell_rect {
 			.left = target->x,
@@ -1499,15 +1504,25 @@ void DrawComposition(Renderer *renderer) {
 		}
 	}
 
-	renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(foreground));
+	// The caret takes the color and the 2 pixel width of the nvim bar cursor it stands in for.
+	// With the animations, the animated cursor glides to it when composing the frame instead.
 	float caret_x = origin_x + CompositionPositionToX(text_layout, renderer->composition_length, renderer->composition_caret);
-	D2D1_RECT_F caret_rect {
-		.left = caret_x,
-		.top = rect.top,
-		.right = caret_x + thin_line,
-		.bottom = rect.bottom
-	};
-	renderer->d2d_context->FillRectangle(caret_rect, renderer->d2d_background_rect_brush);
+	renderer->composition_caret_x = caret_x;
+	if (!renderer->animation_active) {
+		uint32_t caret_color = foreground;
+		CursorCell cursor_cell;
+		if (GetCursorCell(renderer, &cursor_cell)) {
+			caret_color = CreateBackgroundColor(renderer, &cursor_cell.hl_attribs);
+		}
+		renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(caret_color));
+		D2D1_RECT_F caret_rect {
+			.left = caret_x,
+			.top = rect.top,
+			.right = caret_x + 2.0f,
+			.bottom = rect.bottom
+		};
+		renderer->d2d_context->FillRectangle(caret_rect, renderer->d2d_background_rect_brush);
+	}
 
 	renderer->d2d_context->PopAxisAlignedClip();
 	text_layout->Release();
@@ -2090,12 +2105,14 @@ void ComposeFrame(Renderer *renderer) {
 	float scroll_delta_y;
 	float scroll_offset_y = ScrollAnimationCellOffset(renderer, renderer->cursor.row, renderer->cursor.col, &scroll_delta_y);
 
-	// Same size as the cursor drawn by DrawCursor, the bars are 2 pixels wide
-	CursorShape shape = renderer->cursor.mode_info->shape;
-	float width = renderer->font_width * cell.width;
+	// Same size as the cursor drawn by DrawCursor, the bars are 2 pixels wide. While composing,
+	// the cursor becomes the bar of the composition caret, gliding along as the IME text changes.
+	bool composing = renderer->composition_length > 0 && renderer->composition_drawn;
+	CursorShape shape = composing ? CursorShape::Vertical : renderer->cursor.mode_info->shape;
+	float width = composing ? renderer->font_width : renderer->font_width * cell.width;
 	CursorAnimationTarget target {
-		.x = renderer->cursor.col * renderer->font_width,
-		.y = renderer->cursor.row * renderer->font_height + scroll_offset_y,
+		.x = composing ? renderer->composition_caret_x : renderer->cursor.col * renderer->font_width,
+		.y = (composing ? renderer->composition_drawn_row : renderer->cursor.row) * renderer->font_height + scroll_offset_y,
 		.width = width,
 		.height = renderer->font_height,
 		.shape = shape,
@@ -2103,6 +2120,7 @@ void ComposeFrame(Renderer *renderer) {
 		.immediate = !settings->enabled ||
 			(!settings->animate_in_insert_mode && renderer->in_insert_mode) ||
 			(!settings->animate_command_line && changed_to_from_cmdline),
+		.insert_mode = renderer->in_insert_mode,
 		.scroll_delta_y = scroll_delta_y,
 		.color = CreateBackgroundColor(renderer, &cell.hl_attribs)
 	};
@@ -2123,8 +2141,11 @@ void ComposeFrame(Renderer *renderer) {
 		cursor_visible = CursorBlinkVisible(&animation->blink);
 	}
 
-	// The composition string has a caret of its own
-	if (cursor_visible && !renderer->ui_busy && renderer->composition_length == 0) {
+	if (composing) {
+		// The caret is always shown, like the one drawn without the animations
+		DrawAnimatedCursor(renderer, nullptr, &target, 1.0f);
+	}
+	else if (cursor_visible && !renderer->ui_busy && renderer->composition_length == 0) {
 		DrawAnimatedCursor(renderer, &cell, &target, cursor_opacity);
 	}
 	if (settings->enabled) {
