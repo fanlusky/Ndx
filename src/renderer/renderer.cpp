@@ -3,8 +3,16 @@
 #include "renderer/glyph_renderer.h"
 #include "renderer/scroll_animation.h"
 
-constexpr float DEFAULT_NEON_RADIUS = 4.0f;
-constexpr float DEFAULT_NEON_INTENSITY = 1.0f;
+constexpr float DEFAULT_NEON_RADIUS = 7.0f;
+constexpr float DEFAULT_NEON_INTENSITY = 0.2f;
+
+void ReleaseNeonResources(Renderer *renderer) {
+	SafeRelease(&renderer->d2d_neon_bitmap);
+	SafeRelease(&renderer->d2d_neon_base_bitmap);
+	SafeRelease(&renderer->d2d_neon_blur);
+	SafeRelease(&renderer->d2d_neon_sum);
+	SafeRelease(&renderer->d2d_neon_output);
+}
 
 void ResetLineLayouts(Renderer *renderer) {
 	for (LineLayoutEntry &entry : renderer->line_layouts) {
@@ -83,10 +91,7 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 	renderer->d3d_context->Flush();
 	// Recreated with the new size on the next draw
 	SafeRelease(&renderer->d2d_grid_bitmap);
-	SafeRelease(&renderer->d2d_neon_bitmap);
-	SafeRelease(&renderer->d2d_neon_gain);
-	SafeRelease(&renderer->d2d_neon_blur_near);
-	SafeRelease(&renderer->d2d_neon_blur_far);
+	ReleaseNeonResources(renderer);
 	ScrollAnimationReset(renderer->scroll_animation);
 
 	if (renderer->dxgi_swapchain) {
@@ -176,10 +181,7 @@ void HandleDeviceLost(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_context);
 	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
-	SafeRelease(&renderer->d2d_neon_bitmap);
-	SafeRelease(&renderer->d2d_neon_gain);
-	SafeRelease(&renderer->d2d_neon_blur_near);
-	SafeRelease(&renderer->d2d_neon_blur_far);
+	ReleaseNeonResources(renderer);
 	ScrollAnimationReleaseResources(renderer->scroll_animation);
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
@@ -291,10 +293,7 @@ void RendererShutdown(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_context);
 	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
-	SafeRelease(&renderer->d2d_neon_bitmap);
-	SafeRelease(&renderer->d2d_neon_gain);
-	SafeRelease(&renderer->d2d_neon_blur_near);
-	SafeRelease(&renderer->d2d_neon_blur_far);
+	ReleaseNeonResources(renderer);
 	SafeRelease(&renderer->d2d_background_rect_brush);
 	SafeRelease(&renderer->dwrite_factory);
 	SafeRelease(&renderer->dwrite_text_format);
@@ -857,12 +856,20 @@ void DrawGridLine(Renderer *renderer, int row) {
 	text_layout->Draw(renderer, renderer->glyph_renderer, 0.0f, rect.top);
 	renderer->d2d_context->PopAxisAlignedClip();
 	if (renderer->neon_text && renderer->d2d_neon_bitmap) {
-		ID2D1Bitmap1 *target = renderer->animation_active ? renderer->d2d_grid_bitmap : renderer->d2d_target_bitmap;
-		renderer->d2d_context->SetTarget(renderer->d2d_neon_bitmap);
-		renderer->d2d_context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
+		// The text alone is the source of the glow. ClearType needs an opaque background,
+		// on the transparent bitmap it would tint the glyph edges.
+		ID2D1DeviceContext4 *context = renderer->d2d_context;
+		ID2D1Image *target;
+		context->GetTarget(&target);
+		D2D1_TEXT_ANTIALIAS_MODE antialias_mode = context->GetTextAntialiasMode();
+		context->SetTarget(renderer->d2d_neon_bitmap);
+		context->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+		context->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 		text_layout->Draw(renderer, renderer->glyph_renderer, 0.0f, rect.top);
-		renderer->d2d_context->PopAxisAlignedClip();
-		renderer->d2d_context->SetTarget(target);
+		context->PopAxisAlignedClip();
+		context->SetTextAntialiasMode(antialias_mode);
+		context->SetTarget(target);
+		SafeRelease(&target);
 	}
 }
 
@@ -892,21 +899,33 @@ void DrawDirtyGridLines(Renderer *renderer) {
 	renderer->draws_invalidated = false;
 }
 
+constexpr float NEON_GAMMA = 2.2f;
+
 void UpdateNeonEffects(Renderer *renderer) {
-	if (!renderer->d2d_neon_gain) return;
-	float intensity = renderer->neon_intensity;
-	D2D1_MATRIX_5X4_F gain {
-		intensity, 0, 0, 0,
-		0, intensity, 0, 0,
-		0, 0, intensity, 0,
-		0, 0, 0, intensity,
-		0, 0, 0, 0
-	};
-	WIN_CHECK(renderer->d2d_neon_gain->SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX, gain));
-	WIN_CHECK(renderer->d2d_neon_blur_near->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-		renderer->neon_radius * 0.5f));
-	WIN_CHECK(renderer->d2d_neon_blur_far->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+	if (!renderer->d2d_neon_sum) return;
+	WIN_CHECK(renderer->d2d_neon_blur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
 		renderer->neon_radius));
+	// The grid plus the glow, saturating like Godot's linear tonemapping
+	WIN_CHECK(renderer->d2d_neon_sum->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS,
+		D2D1::Vector4F(0.0f, 1.0f, renderer->neon_intensity, 0.0f)));
+}
+
+ID2D1Effect *CreateNeonEffect(Renderer *renderer, REFCLSID effect_id) {
+	ID2D1Effect *effect;
+	WIN_CHECK(renderer->d2d_context->CreateEffect(effect_id, &effect));
+	// The faint edges of the glow would band in 8 bits, especially in linear light
+	WIN_CHECK(effect->SetValue(D2D1_PROPERTY_PRECISION, D2D1_BUFFER_PRECISION_16BPC_FLOAT));
+	return effect;
+}
+
+// Converts the colors between sRGB and linear light, approximated by a gamma of 2.2
+ID2D1Effect *CreateNeonGammaEffect(Renderer *renderer, float exponent) {
+	ID2D1Effect *effect = CreateNeonEffect(renderer, CLSID_D2D1GammaTransfer);
+	WIN_CHECK(effect->SetValue(D2D1_GAMMATRANSFER_PROP_RED_EXPONENT, exponent));
+	WIN_CHECK(effect->SetValue(D2D1_GAMMATRANSFER_PROP_GREEN_EXPONENT, exponent));
+	WIN_CHECK(effect->SetValue(D2D1_GAMMATRANSFER_PROP_BLUE_EXPONENT, exponent));
+	WIN_CHECK(effect->SetValue(D2D1_GAMMATRANSFER_PROP_ALPHA_DISABLE, TRUE));
+	return effect;
 }
 
 void CreateNeonResources(Renderer *renderer) {
@@ -924,24 +943,54 @@ void CreateNeonResources(Renderer *renderer) {
 		.height = max(renderer->pixel_size.height, 1u)
 	};
 	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_bitmap));
-	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1ColorMatrix, &renderer->d2d_neon_gain));
-	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1GaussianBlur, &renderer->d2d_neon_blur_near));
-	WIN_CHECK(renderer->d2d_context->CreateEffect(CLSID_D2D1GaussianBlur, &renderer->d2d_neon_blur_far));
-	renderer->d2d_neon_gain->SetInput(0, renderer->d2d_neon_bitmap);
-	renderer->d2d_neon_blur_near->SetInputEffect(0, renderer->d2d_neon_gain);
-	renderer->d2d_neon_blur_far->SetInputEffect(0, renderer->d2d_neon_gain);
+	// Opaque like the grid bitmap, text is only drawn with ClearType onto an opaque target
+	properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_IGNORE;
+	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_base_bitmap));
+
+	// Light adds up linearly, blurring and adding the sRGB values instead makes the glow
+	// too strong next to the text and too weak further away, and bleaches the colors
+	ID2D1Effect *text = CreateNeonGammaEffect(renderer, NEON_GAMMA);
+	text->SetInput(0, renderer->d2d_neon_bitmap);
+	ID2D1Effect *base = CreateNeonGammaEffect(renderer, NEON_GAMMA);
+	base->SetInput(0, renderer->d2d_neon_base_bitmap);
+
+	// A faint aura following the text, like the glow of Godot used by GriddyCode. A narrow glow
+	// lies on the glyphs and smears them, a wide one pools into blobs of color around the words.
+	renderer->d2d_neon_blur = CreateNeonEffect(renderer, CLSID_D2D1GaussianBlur);
+	renderer->d2d_neon_blur->SetInputEffect(0, text);
+
+	// The glyphs themselves keep their colors and stay sharp, only the space around them glows
+	ID2D1Effect *halo = CreateNeonEffect(renderer, CLSID_D2D1Composite);
+	halo->SetInputEffect(0, renderer->d2d_neon_blur);
+	halo->SetInputEffect(1, text);
+	WIN_CHECK(halo->SetValue(D2D1_COMPOSITE_PROP_MODE, D2D1_COMPOSITE_MODE_DESTINATION_OUT));
+
+	// Clamping also keeps the alpha of the opaque grid at 1
+	renderer->d2d_neon_sum = CreateNeonEffect(renderer, CLSID_D2D1ArithmeticComposite);
+	renderer->d2d_neon_sum->SetInputEffect(0, base);
+	renderer->d2d_neon_sum->SetInputEffect(1, halo);
+	WIN_CHECK(renderer->d2d_neon_sum->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_CLAMP_OUTPUT, TRUE));
+
+	renderer->d2d_neon_output = CreateNeonGammaEffect(renderer, 1.0f / NEON_GAMMA);
+	renderer->d2d_neon_output->SetInputEffect(0, renderer->d2d_neon_sum);
+
+	// The effects are kept alive by the ones using them
+	SafeRelease(&text);
+	SafeRelease(&base);
+	SafeRelease(&halo);
 	UpdateNeonEffects(renderer);
 }
 
+// Replaces the grid drawn into d2d_neon_base_bitmap with the grid and the glow
 void DrawNeonGlow(Renderer *renderer) {
-	// Blur the text into the surrounding background, then restore the sharp
-	// foreground on top so the glow cannot wash out syntax highlight colors.
-	renderer->d2d_context->DrawImage(renderer->d2d_neon_blur_far, nullptr, nullptr,
-		D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_PLUS);
-	renderer->d2d_context->DrawImage(renderer->d2d_neon_blur_near, nullptr, nullptr,
-		D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_PLUS);
-	renderer->d2d_context->DrawImage(renderer->d2d_neon_bitmap, nullptr, nullptr,
-		D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+	D2D1_RECT_F grid_rect {
+		.left = 0.0f,
+		.top = 0.0f,
+		.right = renderer->grid_cols * renderer->font_width,
+		.bottom = renderer->grid_rows * renderer->font_height
+	};
+	renderer->d2d_context->DrawImage(renderer->d2d_neon_output, nullptr, &grid_rect,
+		D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
 }
 
 bool IsSurrogatePair(wchar_t left, wchar_t right) {
@@ -2206,16 +2255,21 @@ void RendererFlush(Renderer* renderer) {
 			}
 		}
 	}
+	ID2D1Bitmap1 *target = renderer->animation_active ? renderer->d2d_grid_bitmap : renderer->d2d_target_bitmap;
 	if (redraw_neon) {
+		// The glow of a line reaches into the lines around it, so the whole grid is drawn again
 		if (!renderer->d2d_neon_bitmap) CreateNeonResources(renderer);
-		ID2D1Bitmap1 *target = renderer->animation_active ? renderer->d2d_grid_bitmap : renderer->d2d_target_bitmap;
 		renderer->d2d_context->SetTarget(renderer->d2d_neon_bitmap);
 		renderer->d2d_context->Clear(D2D1::ColorF(0, 0.0f));
-		renderer->d2d_context->SetTarget(target);
+		renderer->d2d_context->SetTarget(renderer->d2d_neon_base_bitmap);
+		renderer->d2d_context->Clear(D2D1::ColorF(0, 0.0f));
 		renderer->draws_invalidated = true;
 	}
 	DrawDirtyGridLines(renderer);
-	if (redraw_neon) DrawNeonGlow(renderer);
+	if (redraw_neon) {
+		renderer->d2d_context->SetTarget(target);
+		DrawNeonGlow(renderer);
+	}
 	// The animated cursor is drawn over the grid when composing the frame
 	if (!renderer->ui_busy && !renderer->animation_active) {
 		DrawCursor(renderer);
@@ -2331,10 +2385,7 @@ void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpac
 			renderer->neon_text = enabled;
 			renderer->draws_invalidated = true;
 			if (!enabled) {
-				SafeRelease(&renderer->d2d_neon_bitmap);
-				SafeRelease(&renderer->d2d_neon_gain);
-				SafeRelease(&renderer->d2d_neon_blur_near);
-				SafeRelease(&renderer->d2d_neon_blur_far);
+				ReleaseNeonResources(renderer);
 			}
 		}
 		known = true;
