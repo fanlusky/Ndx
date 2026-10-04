@@ -70,6 +70,7 @@ vim.opt.guifont = { "CaskaydiaCove Nerd Font", "Source Han Sans SC", ":h12" }
 | `--maximize` | 启动时最大化窗口 |
 | `--fullscreen` | 启动时进入全屏 |
 | `--position=<x>,<y>` | 设置窗口初始位置，例如 `--position=500,200` |
+| `--position=center` | 启动时将窗口居中显示在所在显示器上（不含任务栏区域） |
 | `--geometry=<cols>x<rows>` | 设置初始网格大小，例如 `--geometry=80x25` |
 | `--disable-ligatures` | 禁用字体连字 |
 | `--disable-fullscreen` | 禁用 Alt+Enter 全屏切换 |

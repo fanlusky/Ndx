@@ -5,6 +5,10 @@
 struct Context {
 	bool start_maximized;
 	bool start_fullscreen;
+	// See KeepCentered
+	bool keep_centered;
+	// Set while Ndx moves or resizes the window itself
+	bool positioning_window;
 	int64_t start_rows;
 	int64_t start_cols;
 	bool disable_fullscreen;
@@ -46,6 +50,56 @@ void ToggleFullscreen(HWND hwnd, Context *context) {
 		SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
 			SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
 	}
+}
+
+// Centers the window in the work area of its monitor. The visible frame is centered, the
+// window rect also includes the invisible resize borders on the left, right and bottom.
+// DWM only reports the visible frame once the window is shown, before that the borders
+// are estimated from the system metrics.
+void CenterWindow(HWND hwnd) {
+	// Maximized and fullscreen windows already fill their monitor
+	if (IsZoomed(hwnd) || !(GetWindowLong(hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW)) return;
+
+	RECT window_rect, frame_rect;
+	MONITORINFO mi { .cbSize = sizeof(MONITORINFO) };
+	if (!GetWindowRect(hwnd, &window_rect) ||
+		!GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+		return;
+	}
+	if (!IsWindowVisible(hwnd) ||
+		FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame_rect, sizeof(RECT)))) {
+		UINT dpi = GetDpiForWindow(hwnd);
+		LONG border = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+		frame_rect = RECT {
+			.left = window_rect.left + border,
+			.top = window_rect.top,
+			.right = window_rect.right - border,
+			.bottom = window_rect.bottom - border
+		};
+	}
+
+	LONG frame_width = frame_rect.right - frame_rect.left;
+	LONG frame_height = frame_rect.bottom - frame_rect.top;
+	LONG frame_x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - frame_width) / 2;
+	LONG frame_y = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - frame_height) / 2;
+	// Keep the title bar on screen when the window is larger than the work area
+	frame_x = max(frame_x, mi.rcWork.left);
+	frame_y = max(frame_y, mi.rcWork.top);
+	SetWindowPos(hwnd, nullptr,
+		frame_x - (frame_rect.left - window_rect.left),
+		frame_y - (frame_rect.top - window_rect.top),
+		0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+// With --position=center, the window is centered again whenever Ndx resizes it, as the
+// font and grid size settle during startup. That stops once the window is moved or
+// resized from outside, or the user starts typing or clicking.
+void KeepCentered(Context *context) {
+	if (!context->keep_centered) return;
+	bool positioning = context->positioning_window;
+	context->positioning_window = true;
+	CenterWindow(context->hwnd);
+	context->positioning_window = positioning;
 }
 
 void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
@@ -135,6 +189,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
 	switch (msg) {
 	case WM_SIZE: {
+		// Moved or resized by the user or the system, it then stays where it was put
+		if (!context->positioning_window) {
+			context->keep_centered = false;
+		}
 		if (wparam != SIZE_MINIMIZED) {
 			uint32_t new_width = LOWORD(lparam);
 			uint32_t new_height = HIWORD(lparam);
@@ -144,6 +202,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 		}
 	} return 0;
 	case WM_MOVE: {
+		if (!context->positioning_window) {
+			context->keep_centered = false;
+		}
 		TsfNotifyLayoutChange(context->tsf);
 	} return 0;
 	case WM_DPICHANGED: {
@@ -171,7 +232,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	} return 0;
 	case WM_NVIM_MESSAGE: {
 		mpack_tree_t *tree = reinterpret_cast<mpack_tree_t *>(wparam);
+		// Ndx shows and resizes the window itself here, to fit nvim's grid and --geometry
+		RECT previous_rect {};
+		GetWindowRect(hwnd, &previous_rect);
+		bool was_visible = IsWindowVisible(hwnd);
+		context->positioning_window = true;
 		ProcessMPackMessage(context, tree);
+		context->positioning_window = false;
+
+		RECT rect {};
+		GetWindowRect(hwnd, &rect);
+		bool visible = IsWindowVisible(hwnd);
+		if (visible != was_visible ||
+			rect.right - rect.left != previous_rect.right - previous_rect.left ||
+			rect.bottom - rect.top != previous_rect.bottom - previous_rect.top) {
+			KeepCentered(context);
+		}
 
 		// This message is sent from the nvim thread and handled within GetMessage, which keeps
 		// waiting afterwards. Wake up the message loop in case an animation or blinking started.
@@ -455,6 +531,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 	LPWSTR *cmd_line_args = CommandLineToArgvW(GetCommandLineW(), &n_args);
 	bool start_maximized = false;
 	bool start_fullscreen = false;
+	bool start_centered = false;
 	bool disable_ligatures = false;
   bool disable_fullscreen = false;
 	float linespace_factor = 1.0f;
@@ -503,6 +580,9 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 			wchar_t *end_ptr;
 			start_cols = wcstol(&cmd_line_args[i][11], &end_ptr, 10);
 			start_rows = wcstol(end_ptr + 1, nullptr, 10);
+		}
+		else if(!wcscmp(cmd_line_args[i], L"--position=center")) {
+			start_centered = true;
 		}
 		else if(!wcsncmp(cmd_line_args[i], L"--position=", wcslen(L"--position="))) {
 			wchar_t *end_ptr;
@@ -575,6 +655,9 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 	Context context {
 		.start_maximized = start_maximized,
 		.start_fullscreen = start_fullscreen,
+		.keep_centered = start_centered,
+		// Until the message loop starts, the window is set up by Ndx
+		.positioning_window = true,
 		.start_rows = start_rows,
 		.start_cols = start_cols,
         .disable_fullscreen = disable_fullscreen,
@@ -635,6 +718,8 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 		window_flags = window_flags & ~SWP_NOMOVE;
 	}
 	SetWindowPos(hwnd, HWND_TOP, start_pos_x, start_pos_y, 0, 0, window_flags);
+	// Before going fullscreen, so leaving it restores the centered window
+	KeepCentered(&context);
 
 	if (start_fullscreen) {
 		ToggleFullscreen(context.hwnd, &context);
@@ -645,6 +730,8 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 	auto [rows, cols] = RendererPixelsToGridSize(context.renderer,
 		context.renderer->pixel_size.width, context.renderer->pixel_size.height);
 	NvimSendUIAttach(context.nvim, rows, cols);
+
+	context.positioning_window = false;
 
 	MSG msg;
 	uint32_t previous_width = 0, previous_height = 0;
@@ -665,6 +752,20 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 		}
 		else if (GetMessage(&msg, 0, 0, 0) <= 0) {
 			break;
+		}
+
+		// Once the user starts working, later resizes such as font size changes keep the position
+		switch (msg.message) {
+		case WM_KEYDOWN:
+		case WM_SYSKEYDOWN:
+		case WM_LBUTTONDOWN:
+		case WM_RBUTTONDOWN:
+		case WM_MBUTTONDOWN:
+		case WM_XBUTTONDOWN:
+		case WM_MOUSEWHEEL:
+		case WM_MOUSEHWHEEL: {
+			context.keep_centered = false;
+		} break;
 		}
 
 		// TranslateMessage(&msg);
