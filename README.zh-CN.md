@@ -18,7 +18,7 @@ Ndx 是基于早期 Nvy 代码发展而来的个人项目。本文末尾记录�
 - 通过 Text Services Framework（TSF）支持输入法，包括行内组合文本和跟随光标的候选窗口
 - `guifont` 支持逗号分隔的字体列表，可为缺失字形回退到其他字体
 - 可选的光标动画、光标特效、平滑滚动和光标渐隐闪烁
-- 使用 Alt+Enter 切换全屏；使用 Ctrl+鼠标滚轮缩放
+- 可在 Neovim 中切换全屏和无边框窗口；使用 Ctrl+鼠标滚轮缩放
 - 拖放文件即可打开；按住 Ctrl 拖放可在新窗口打开
 - 支持设置窗口位置、网格大小、字体和 Neovim 可执行文件的命令行参数
 
@@ -73,7 +73,7 @@ vim.opt.guifont = { "CaskaydiaCove Nerd Font", "Source Han Sans SC", ":h12" }
 | `--position=center` | 启动时将窗口居中显示在所在显示器上（不含任务栏区域） |
 | `--geometry=<cols>x<rows>` | 设置初始网格大小，例如 `--geometry=80x25` |
 | `--disable-ligatures` | 禁用字体连字 |
-| `--disable-fullscreen` | 禁用 Alt+Enter 全屏切换 |
+| `--disable-fullscreen` | 忽略 `g:ndx_fullscreen` |
 | `--linespace-factor=<float>` | 设置行距，例如 `--linespace-factor=1.2` |
 | `--cursor-timeout=<int>` | 光标空闲指定毫秒数后隐藏 |
 | `--neovim-bin=<path>` | 指定 `nvim.exe` 的路径 |
@@ -95,6 +95,19 @@ neovim_bin = 'C:\Program Files\Neovim\bin\nvim.exe'
 ```
 
 只支持顶层的 `key = value` 行，值可以是字符串、数字和布尔值。Windows 路径请用单引号，或在双引号中把反斜杠写成两个，因为 `"C:\nvim"` 中的 `\n` 会被当成换行。未知选项、无效值等问题会在启动时用对话框列出，其余选项照常生效。
+
+## 全屏与无边框窗口
+
+将 `g:ndx_fullscreen` 设为 `true` 或 `false` 可进入或退出全屏；使用 `--fullscreen` 启动时它的初始值为 `true`。将 `g:ndx_borderless` 设为 `true` 可隐藏标题栏，设回 `false` 则重新显示；切换时文字位置不变，窗口仍保留阴影、圆角、贴靠和边缘拖动调整大小。两者都能在运行时随时切换。Ndx 本身不为它们提供快捷键，Alt+Enter 会以 `<M-CR>` 传给 Neovim。可以自己绑定快捷键，例如：
+
+```lua
+if vim.g.ndx then
+  vim.keymap.set({ "n", "i", "v", "t" }, "<F11>", function() vim.g.ndx_fullscreen = not vim.g.ndx_fullscreen end)
+  vim.keymap.set({ "n", "i", "v", "t" }, "<M-CR>", function() vim.g.ndx_borderless = not vim.g.ndx_borderless end)
+end
+```
+
+没有标题栏时，可用 Win+方向键，或 Alt+Space 后选择“移动”来移动窗口。
 
 ## 可选动画与文字光晕
 

@@ -134,6 +134,9 @@ struct Renderer {
 	bool cursor_animation_was_in_cmdline;
 	LARGE_INTEGER performance_frequency;
 	ID2D1Bitmap1 *d2d_grid_bitmap;
+	// Set by g:ndx_borderless, the window then has no title bar and the client area is the
+	// whole window rect
+	bool borderless;
 	bool neon_text;
 	float neon_radius;
 	float neon_intensity;

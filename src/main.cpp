@@ -1,6 +1,7 @@
 #include "config/config.h"
 #include "nvim/nvim.h"
 #include "renderer/renderer.h"
+#include "renderer/cursor_animation.h"
 #include "tsf/tsf.h"
 
 struct Context {
@@ -51,6 +52,81 @@ void ToggleFullscreen(HWND hwnd, Context *context) {
 		SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
 			SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
 	}
+}
+
+// Set by g:ndx_fullscreen, which is kept in sync with --fullscreen at VimEnter
+void SetFullscreen(HWND hwnd, Context *context, bool fullscreen) {
+	if (context->disable_fullscreen) return;
+	bool is_fullscreen = !(GetWindowLong(hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW);
+	if (fullscreen != is_fullscreen) {
+		ToggleFullscreen(hwnd, context);
+	}
+}
+
+// A borderless window keeps its WS_OVERLAPPEDWINDOW style, so snapping, the minimize and
+// maximize animations and the DWM shadow and rounded corners keep working. WM_NCCALCSIZE
+// makes the whole window rect the client area and WM_NCHITTEST adds the resize borders.
+bool IsBorderlessFrame(HWND hwnd, Context *context) {
+	// Fullscreen removes WS_OVERLAPPEDWINDOW, the window has no frame then anyway
+	return context && context->renderer->borderless && (GetWindowLong(hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW);
+}
+
+void SetBorderless(HWND hwnd, Context *context, bool borderless) {
+	Renderer *renderer = context->renderer;
+	if (borderless == renderer->borderless) return;
+
+	// The text stays in place, the title bar and borders are added or removed around it
+	RECT client_rect;
+	GetClientRect(hwnd, &client_rect);
+	MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT *>(&client_rect), 2);
+	renderer->borderless = borderless;
+
+	// Extending the frame 1px into the client area brings back the DWM shadow
+	MARGINS margins = borderless ? MARGINS { 1, 1, 1, 1 } : MARGINS {};
+	DwmExtendFrameIntoClientArea(hwnd, &margins);
+
+	// Maximized and fullscreen windows keep filling their monitor
+	if (IsZoomed(hwnd) || !(GetWindowLong(hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW)) {
+		SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+			SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+		return;
+	}
+
+	RECT window_rect = client_rect;
+	if (!borderless) {
+		AdjustWindowRectExForDpi(&window_rect, WS_OVERLAPPEDWINDOW, false,
+			GetWindowLong(hwnd, GWL_EXSTYLE), GetDpiForWindow(hwnd));
+		// Keep the title bar on screen
+		MONITORINFO mi { .cbSize = sizeof(MONITORINFO) };
+		if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi) &&
+			window_rect.top < mi.rcWork.top) {
+			OffsetRect(&window_rect, 0, mi.rcWork.top - window_rect.top);
+		}
+	}
+	SetWindowPos(hwnd, nullptr, window_rect.left, window_rect.top,
+		window_rect.right - window_rect.left, window_rect.bottom - window_rect.top,
+		SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+LRESULT BorderlessHitTest(HWND hwnd, LPARAM lparam) {
+	// A maximized window can't be resized from its edges
+	if (IsZoomed(hwnd)) return HTCLIENT;
+
+	POINT cursor { static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam)) };
+	RECT rect;
+	if (!GetWindowRect(hwnd, &rect)) return HTNOWHERE;
+	UINT dpi = GetDpiForWindow(hwnd);
+	LONG border = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+
+	bool left = cursor.x < rect.left + border;
+	bool right = cursor.x >= rect.right - border;
+	bool top = cursor.y < rect.top + border;
+	bool bottom = cursor.y >= rect.bottom - border;
+	if (top) return left ? HTTOPLEFT : right ? HTTOPRIGHT : HTTOP;
+	if (bottom) return left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM;
+	if (left) return HTLEFT;
+	if (right) return HTRIGHT;
+	return HTCLIENT;
 }
 
 // Centers the window in the work area of its monitor. The visible frame is centered, the
@@ -154,7 +230,17 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 			mpack_node_t name = mpack_node_array_at(result.params, 0);
 			mpack_node_t value = mpack_node_array_at(result.params, 1);
 			if (mpack_node_type(name) == mpack_type_str) {
-				RendererSetOption(context->renderer, mpack_node_str(name), mpack_node_strlen(name), value);
+				const char *name_str = mpack_node_str(name);
+				size_t name_length = mpack_node_strlen(name);
+				if (name_length == strlen("ndx_borderless") && !strncmp(name_str, "ndx_borderless", name_length)) {
+					SetBorderless(context->hwnd, context, NodeToBool(value, false));
+				}
+				else if (name_length == strlen("ndx_fullscreen") && !strncmp(name_str, "ndx_fullscreen", name_length)) {
+					SetFullscreen(context->hwnd, context, NodeToBool(value, false));
+				}
+				else {
+					RendererSetOption(context->renderer, name_str, name_length, value);
+				}
 			}
 		}
 	} break;
@@ -165,6 +251,10 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 			NvimSendResponse(context->nvim, result.request.msg_id);
 			NvimGetOptionValue(context->nvim, "guifont");
 			NvimSendOptions(context->nvim);
+			// So that toggling g:ndx_fullscreen leaves the fullscreen window --fullscreen opened
+			if (!(GetWindowLong(context->hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW)) {
+				NvimSendCommand(context->nvim, "let g:ndx_fullscreen = v:true");
+			}
 		}
 	} break;
 	}
@@ -189,6 +279,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	}
 
 	switch (msg) {
+	case WM_NCCALCSIZE: {
+		if (wparam == TRUE && IsBorderlessFrame(hwnd, context)) {
+			// A maximized window extends past its monitor by the frame size, keep the client
+			// area within the work area
+			RECT &rect = reinterpret_cast<NCCALCSIZE_PARAMS *>(lparam)->rgrc[0];
+			MONITORINFO mi { .cbSize = sizeof(MONITORINFO) };
+			if (IsZoomed(hwnd) && GetMonitorInfo(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &mi)) {
+				rect = mi.rcWork;
+			}
+			return 0;
+		}
+	} break;
+	case WM_NCHITTEST: {
+		if (IsBorderlessFrame(hwnd, context)) {
+			return BorderlessHitTest(hwnd, lparam);
+		}
+	} break;
 	case WM_SIZE: {
 		// Moved or resized by the user or the system, it then stays where it was put
 		if (!context->positioning_window) {
@@ -308,11 +415,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 			return 0;
 		}
 
-		// Special case for <ALT+ENTER> (fullscreen transition)
-		if (!context->disable_fullscreen && ((GetKeyState(VK_LMENU) & 0x80) != 0) && wparam == VK_RETURN) {
-			ToggleFullscreen(hwnd, context);
-		}
-		else if (((GetKeyState(VK_LMENU) & 0x80) != 0) && wparam == VK_F4) {
+		// Fullscreen and the borderless window are toggled from nvim, see g:ndx_fullscreen and
+		// g:ndx_borderless, so Alt+Enter reaches nvim as <M-CR>
+		if (((GetKeyState(VK_LMENU) & 0x80) != 0) && wparam == VK_F4) {
 			NvimQuit(context->nvim);
 		}
 		else {

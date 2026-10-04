@@ -2514,9 +2514,11 @@ PixelSize RendererGridToPixelSize(Renderer *renderer, int rows, int cols) {
 	int requested_width = static_cast<int>(ceilf(renderer->font_width) * cols);
 	int requested_height = static_cast<int>(ceilf(renderer->font_height) * rows);
 
-	// Adjust size to include title bar
+	// Adjust size to include title bar, a borderless window is all client area
 	RECT adjusted_rect = { 0, 0, requested_width, requested_height };
-	AdjustWindowRect(&adjusted_rect, WS_OVERLAPPEDWINDOW, false);
+	if (!renderer->borderless) {
+		AdjustWindowRect(&adjusted_rect, WS_OVERLAPPEDWINDOW, false);
+	}
 	return PixelSize {
 		.width = adjusted_rect.right - adjusted_rect.left,
 		.height = adjusted_rect.bottom - adjusted_rect.top
