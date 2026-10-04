@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/3d2d0769-f280-46a9-afdd-c4c6d9838f6c
 - Text Services Framework (TSF) support for IMEs, including inline composition text and a cursor-following candidate window
 - Comma-separated `guifont` font lists, with fallback fonts for missing glyphs
 - Optional animated cursor, cursor effects, smooth scrolling, and smooth cursor blinking
-- Alt+Enter to toggle fullscreen; Ctrl+mouse wheel to zoom
+- Fullscreen and a borderless window, toggled from Neovim; Ctrl+mouse wheel to zoom
 - Drag and drop files to open them; hold Ctrl while dropping to open them in a new window
 - Command-line options for window placement, geometry, fonts, and the Neovim executable
 
@@ -71,7 +71,7 @@ Available command-line options:
 | `--position=center` | Center the window on its monitor at startup, excluding the taskbar |
 | `--geometry=<cols>x<rows>` | Set the initial grid size, for example `--geometry=80x25` |
 | `--disable-ligatures` | Disable font ligatures |
-| `--disable-fullscreen` | Disable the Alt+Enter fullscreen toggle |
+| `--disable-fullscreen` | Ignore `g:ndx_fullscreen` |
 | `--linespace-factor=<float>` | Set line spacing, for example `--linespace-factor=1.2` |
 | `--cursor-timeout=<int>` | Hide the cursor after the given idle time in milliseconds |
 | `--neovim-bin=<path>` | Use a specific `nvim.exe` path |
@@ -93,6 +93,19 @@ neovim_bin = 'C:\Program Files\Neovim\bin\nvim.exe'
 ```
 
 Only top-level `key = value` lines with strings, numbers and booleans are supported. Write Windows paths in single quotes, or double the backslashes inside double quotes, since `"C:\nvim"` would turn `\n` into a line break. Problems such as unknown options or invalid values are listed in a message box at startup, and the remaining options still apply.
+
+## Fullscreen and borderless window
+
+Set `g:ndx_fullscreen` to `true` or `false` to enter or leave fullscreen; with `--fullscreen` it starts out `true`. Set `g:ndx_borderless` to `true` to hide the title bar, and back to `false` to show it again. The text stays where it is and the window keeps its shadow, rounded corners, snapping and resizing from its edges. Both can be changed while Ndx is running. Ndx has no shortcuts for them, Alt+Enter is passed to Neovim as `<M-CR>`. Bind keys to toggle them, for example:
+
+```lua
+if vim.g.ndx then
+  vim.keymap.set({ "n", "i", "v", "t" }, "<F11>", function() vim.g.ndx_fullscreen = not vim.g.ndx_fullscreen end)
+  vim.keymap.set({ "n", "i", "v", "t" }, "<M-CR>", function() vim.g.ndx_borderless = not vim.g.ndx_borderless end)
+end
+```
+
+Without a title bar, move the window with Win+arrow keys or Alt+Space, then Move.
 
 ## Optional animations and text glow
 
