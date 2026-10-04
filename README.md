@@ -76,6 +76,24 @@ Available command-line options:
 | `--cursor-timeout=<int>` | Hide the cursor after the given idle time in milliseconds |
 | `--neovim-bin=<path>` | Use a specific `nvim.exe` path |
 
+## Configuration file
+
+The command-line options can also be set in `%LOCALAPPDATA%\Ndx\config.toml`, which is read at startup. Options given on the command line take precedence over the file.
+
+```toml
+position = "center"          # or "500,200"
+geometry = "100x30"          # <cols>x<rows>
+maximize = false
+fullscreen = false
+disable_ligatures = false
+disable_fullscreen = false
+linespace_factor = 1.2
+cursor_timeout = 3000        # milliseconds, 0 turns it off
+neovim_bin = 'C:\Program Files\Neovim\bin\nvim.exe'
+```
+
+Only top-level `key = value` lines with strings, numbers and booleans are supported. Write Windows paths in single quotes, or double the backslashes inside double quotes, since `"C:\nvim"` would turn `\n` into a line break. Problems such as unknown options or invalid values are listed in a message box at startup, and the remaining options still apply.
+
 ## Optional animations and text glow
 
 Animations are off by default. Enable them in your Neovim Lua configuration:

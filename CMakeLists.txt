@@ -12,6 +12,7 @@ set(Ndx_HEADERS
     "src/common/mpack_helper.h"
     "src/common/vec.h"
     "src/common/window_messages.h"
+    "src/config/config.h"
     "src/nvim/nvim.h"
     "src/renderer/cursor_animation.h"
     "src/renderer/glyph_renderer.h"
@@ -23,6 +24,7 @@ set(Ndx_HEADERS
 
 set(Ndx_SOURCES
     "src/main.cpp"
+    "src/config/config.cpp"
     "src/nvim/nvim.cpp"
     "src/renderer/cursor_animation.cpp"
     "src/renderer/glyph_renderer.cpp"
