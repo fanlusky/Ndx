@@ -137,10 +137,15 @@ struct Renderer {
 	bool neon_text;
 	float neon_radius;
 	float neon_intensity;
+	// With the neon glow, the grid is drawn into d2d_neon_base_bitmap and its text alone into
+	// d2d_neon_bitmap. The glow of the text is added to the grid in linear light by the
+	// effects ending in d2d_neon_output, which is drawn where the grid would have been drawn.
 	ID2D1Bitmap1 *d2d_neon_bitmap;
-	ID2D1Effect *d2d_neon_gain;
+	ID2D1Bitmap1 *d2d_neon_base_bitmap;
 	ID2D1Effect *d2d_neon_blur_near;
 	ID2D1Effect *d2d_neon_blur_far;
+	ID2D1Effect *d2d_neon_sum;
+	ID2D1Effect *d2d_neon_output;
 	bool window_focused;
 
 	// Animations advance by a refresh period of the window's monitor per frame, animation_time
