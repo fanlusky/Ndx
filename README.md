@@ -68,6 +68,7 @@ Available command-line options:
 | `--maximize` | Start maximized |
 | `--fullscreen` | Start fullscreen |
 | `--position=<x>,<y>` | Set the initial window position, for example `--position=500,200` |
+| `--position=center` | Center the window on its monitor at startup, excluding the taskbar |
 | `--geometry=<cols>x<rows>` | Set the initial grid size, for example `--geometry=80x25` |
 | `--disable-ligatures` | Disable font ligatures |
 | `--disable-fullscreen` | Disable the Alt+Enter fullscreen toggle |
