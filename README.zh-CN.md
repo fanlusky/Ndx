@@ -126,6 +126,8 @@ Ndx 支持光标移动动画、光标粒子特效、平滑闪烁和平滑滚动�
 
 将 `g:ndx_cursor_trail_in_insert_mode` 设为 `false` 后，打字时只保留平滑的光标移动，效果类似 Word 的平滑光标：insert 模式下光标移动不会拉出拖尾，也不显示粒子特效；普通模式仍保留完整动画。默认值为 `true`。打字时两个字符以内的移动使用 `g:ndx_cursor_short_animation_length`（默认 `0.04`），如需更明显的滑动效果，可调大到 `0.08` 等值。
 
+`g:ndx_cursor_normal_mode_animation_length` 单独设置 insert 以外模式（normal、visual 等）下光标移动的时长，单位为秒，例如 `vim.g.ndx_cursor_normal_mode_animation_length = 0.3`。它也作用于 `h`、`l` 这类两个字符以内的短距离移动，这类移动不再使用 `g:ndx_cursor_short_animation_length`。未设置（或设为负数、`nil`）时沿用 `g:ndx_cursor_animation_length`，可在运行时调整。
+
 设置 `g:ndx_neon_text` 为 `true` 或 `false` 可在运行时开关文字霓虹光晕，默认关闭。效果参照 GriddyCode 的光晕：每段文字背后都有一圈与自身颜色相同的柔和光晕，按线性光叠加到背景上；文字本身保持清晰，颜色不变。
 `g:ndx_neon_radius` 是光晕的模糊半径，默认 `7.0` 像素，值太小会让字形发糊，太大会在文字周围形成一团团颜色；`g:ndx_neon_intensity` 控制亮度，默认 `0.2`，设为 `0` 时没有光晕。两项都能在运行时调整，超出范围的值会被限制在允许范围内。
 

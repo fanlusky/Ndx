@@ -11,6 +11,7 @@ constexpr CursorAnimationSettings DEFAULT_SETTINGS {
 	.enabled = false,
 	.animation_length = 0.150f,
 	.short_animation_length = 0.04f,
+	.normal_mode_animation_length = -1.0f,
 	.trail_size = 1.0f,
 	.animate_in_insert_mode = true,
 	.trail_in_insert_mode = true,
@@ -266,6 +267,11 @@ bool CursorAnimationSetOption(CursorAnimation *animation, const char *name, size
 	else if (Matches("short_animation_length")) {
 		settings->short_animation_length = max(0.0f, NodeToFloat(value, DEFAULT_SETTINGS.short_animation_length));
 	}
+	else if (Matches("normal_mode_animation_length")) {
+		// nil, a negative value or another unexpected type unsets it, animation_length is used again
+		float length = NodeToFloat(value, DEFAULT_SETTINGS.normal_mode_animation_length);
+		settings->normal_mode_animation_length = length < 0.0f ? DEFAULT_SETTINGS.normal_mode_animation_length : length;
+	}
 	else if (Matches("trail_size")) {
 		settings->trail_size = NodeToFloat(value, DEFAULT_SETTINGS.trail_size);
 	}
@@ -371,18 +377,20 @@ void CornerJump(CursorCorner *corner, const CursorAnimationSettings *settings, c
 	CornerDestination(corner, target, center_x, center_y, &destination_x, &destination_y);
 	float jump_x = (destination_x - corner->previous_destination_x) / target->width;
 	float jump_y = (destination_y - corner->previous_destination_y) / target->height;
+	bool normal_mode_length = !target->insert_mode && settings->normal_mode_animation_length >= 0.0f;
+	float animation_length = normal_mode_length ? settings->normal_mode_animation_length : settings->animation_length;
 
-	if (fabsf(jump_x) <= 2.001f && fabsf(jump_y) <= 0.001f) {
+	if (!normal_mode_length && fabsf(jump_x) <= 2.001f && fabsf(jump_y) <= 0.001f) {
 		// Short jumps of up to two characters, typically when typing in insert mode
-		corner->animation_length = min(settings->animation_length, settings->short_animation_length);
+		corner->animation_length = min(animation_length, settings->short_animation_length);
 	}
 	else if (!trail) {
 		// All corners move together, so the cursor glides without stretching
-		corner->animation_length = settings->animation_length;
+		corner->animation_length = animation_length;
 	}
 	else {
-		float leading = settings->animation_length * max(0.0f, min(1.0f - settings->trail_size, 1.0f));
-		float trailing = settings->animation_length;
+		float leading = animation_length * max(0.0f, min(1.0f - settings->trail_size, 1.0f));
+		float trailing = animation_length;
 		corner->animation_length = Lerp(trailing, leading, alignment);
 	}
 }
