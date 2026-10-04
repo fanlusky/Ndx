@@ -142,8 +142,7 @@ struct Renderer {
 	// effects ending in d2d_neon_output, which is drawn where the grid would have been drawn.
 	ID2D1Bitmap1 *d2d_neon_bitmap;
 	ID2D1Bitmap1 *d2d_neon_base_bitmap;
-	ID2D1Effect *d2d_neon_blur_near;
-	ID2D1Effect *d2d_neon_blur_far;
+	ID2D1Effect *d2d_neon_blur;
 	ID2D1Effect *d2d_neon_sum;
 	ID2D1Effect *d2d_neon_output;
 	bool window_focused;

@@ -103,8 +103,8 @@ vim.g.ndx_cursor_animation = true
 vim.g.ndx_cursor_vfx_mode = "railgun" -- or a list, e.g. { "railgun", "sonicboom" }
 vim.g.ndx_scroll_animation = true
 vim.g.ndx_neon_text = true -- glow around text; disabled by default
-vim.g.ndx_neon_radius = 10.0 -- glow radius in pixels (0.5–40)
-vim.g.ndx_neon_intensity = 0.5 -- glow strength (0–2)
+vim.g.ndx_neon_radius = 14.0 -- glow radius in pixels (0.5–40)
+vim.g.ndx_neon_intensity = 0.45 -- glow strength (0–2)
 ```
 
 Ndx supports cursor movement animation, cursor particle effects, smooth cursor blinking, and smooth scrolling. The settings use the corresponding Neovide names with an `ndx_` prefix. For example, `g:ndx_cursor_animation_length` controls cursor movement duration and `g:ndx_scroll_animation_length` controls scroll duration. Unset settings use their defaults. Smooth scrolling follows Neovim window scroll events; moving floating windows are not animated.
@@ -112,7 +112,7 @@ Ndx supports cursor movement animation, cursor particle effects, smooth cursor b
 Set `g:ndx_cursor_trail_in_insert_mode` to `false` to keep only a plain smooth cursor glide while typing, like the smooth caret in Word: in insert mode the cursor moves without stretching into a trail and no particle effects are shown. Normal mode keeps the full animation. It is `true` by default. Typing moves of up to two characters use `g:ndx_cursor_short_animation_length` (default `0.04`); raise it, for example to `0.08`, for a more visible glide.
 
 Set `g:ndx_neon_text` to `true` or `false` to toggle the text glow while Ndx is running. It is off by default. Like the glow in GriddyCode, each piece of text gets a soft aura in its own color, added to the background in linear light. The text itself stays sharp and keeps its colors.
-`g:ndx_neon_radius` is the blur radius of the aura in pixels (default `10.0`); small values put a strong glow right on the glyphs and look smeared. `g:ndx_neon_intensity` controls brightness (default `0.5`, with `0` removing the glow). Both can be changed while Ndx is running; out-of-range values are clamped.
+`g:ndx_neon_radius` is the blur radius of the aura in pixels (default `14.0`); small values put a strong glow right on the glyphs and look smeared. `g:ndx_neon_intensity` controls brightness (default `0.45`, with `0` removing the glow). Both can be changed while Ndx is running; out-of-range values are clamped.
 
 ## License and project history
 

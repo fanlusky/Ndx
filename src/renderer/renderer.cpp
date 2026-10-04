@@ -3,14 +3,13 @@
 #include "renderer/glyph_renderer.h"
 #include "renderer/scroll_animation.h"
 
-constexpr float DEFAULT_NEON_RADIUS = 10.0f;
-constexpr float DEFAULT_NEON_INTENSITY = 0.5f;
+constexpr float DEFAULT_NEON_RADIUS = 14.0f;
+constexpr float DEFAULT_NEON_INTENSITY = 0.45f;
 
 void ReleaseNeonResources(Renderer *renderer) {
 	SafeRelease(&renderer->d2d_neon_bitmap);
 	SafeRelease(&renderer->d2d_neon_base_bitmap);
-	SafeRelease(&renderer->d2d_neon_blur_near);
-	SafeRelease(&renderer->d2d_neon_blur_far);
+	SafeRelease(&renderer->d2d_neon_blur);
 	SafeRelease(&renderer->d2d_neon_sum);
 	SafeRelease(&renderer->d2d_neon_output);
 }
@@ -900,19 +899,11 @@ void DrawDirtyGridLines(Renderer *renderer) {
 	renderer->draws_invalidated = false;
 }
 
-// The glow is mostly a wide, faint aura behind the text, like the glow levels of Godot used by
-// GriddyCode, with a little of a narrower one to lift the words. A strong glow close to the
-// glyphs fills the gaps between them and looks smeared at text sizes.
-constexpr float NEON_NEAR_RADIUS_SCALE = 0.3f;
-constexpr float NEON_NEAR_WEIGHT = 0.15f;
-constexpr float NEON_FAR_WEIGHT = 0.85f;
 constexpr float NEON_GAMMA = 2.2f;
 
 void UpdateNeonEffects(Renderer *renderer) {
 	if (!renderer->d2d_neon_sum) return;
-	WIN_CHECK(renderer->d2d_neon_blur_near->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-		renderer->neon_radius * NEON_NEAR_RADIUS_SCALE));
-	WIN_CHECK(renderer->d2d_neon_blur_far->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+	WIN_CHECK(renderer->d2d_neon_blur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
 		renderer->neon_radius));
 	// The grid plus the glow, saturating like Godot's linear tonemapping
 	WIN_CHECK(renderer->d2d_neon_sum->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS,
@@ -952,6 +943,8 @@ void CreateNeonResources(Renderer *renderer) {
 		.height = max(renderer->pixel_size.height, 1u)
 	};
 	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_bitmap));
+	// Opaque like the grid bitmap, text is only drawn with ClearType onto an opaque target
+	properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_IGNORE;
 	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_base_bitmap));
 
 	// Light adds up linearly, blurring and adding the sRGB values instead makes the glow
@@ -961,21 +954,14 @@ void CreateNeonResources(Renderer *renderer) {
 	ID2D1Effect *base = CreateNeonGammaEffect(renderer, NEON_GAMMA);
 	base->SetInput(0, renderer->d2d_neon_base_bitmap);
 
-	renderer->d2d_neon_blur_near = CreateNeonEffect(renderer, CLSID_D2D1GaussianBlur);
-	renderer->d2d_neon_blur_near->SetInputEffect(0, text);
-	renderer->d2d_neon_blur_far = CreateNeonEffect(renderer, CLSID_D2D1GaussianBlur);
-	renderer->d2d_neon_blur_far->SetInputEffect(0, text);
-
-	ID2D1Effect *glow = CreateNeonEffect(renderer, CLSID_D2D1ArithmeticComposite);
-	glow->SetInputEffect(0, renderer->d2d_neon_blur_near);
-	glow->SetInputEffect(1, renderer->d2d_neon_blur_far);
-	WIN_CHECK(glow->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS,
-		D2D1::Vector4F(0.0f, NEON_NEAR_WEIGHT, NEON_FAR_WEIGHT, 0.0f)));
-	WIN_CHECK(glow->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_CLAMP_OUTPUT, FALSE));
+	// A wide, faint aura behind the text, like the glow of Godot used by GriddyCode. A narrow
+	// glow lies on the glyphs and fills the gaps between them, the text looks smeared then.
+	renderer->d2d_neon_blur = CreateNeonEffect(renderer, CLSID_D2D1GaussianBlur);
+	renderer->d2d_neon_blur->SetInputEffect(0, text);
 
 	// The glyphs themselves keep their colors and stay sharp, only the space around them glows
 	ID2D1Effect *halo = CreateNeonEffect(renderer, CLSID_D2D1Composite);
-	halo->SetInputEffect(0, glow);
+	halo->SetInputEffect(0, renderer->d2d_neon_blur);
 	halo->SetInputEffect(1, text);
 	WIN_CHECK(halo->SetValue(D2D1_COMPOSITE_PROP_MODE, D2D1_COMPOSITE_MODE_DESTINATION_OUT));
 
@@ -991,7 +977,6 @@ void CreateNeonResources(Renderer *renderer) {
 	// The effects are kept alive by the ones using them
 	SafeRelease(&text);
 	SafeRelease(&base);
-	SafeRelease(&glow);
 	SafeRelease(&halo);
 	UpdateNeonEffects(renderer);
 }
