@@ -227,6 +227,8 @@ struct Renderer {
 	uint32_t composition_clause_count;
 	bool composition_drawn;
 	int composition_drawn_row;
+	// With the animations, the animated cursor moves to the caret instead of it being drawn with the composition
+	float composition_caret_x;
 
 	HWND hwnd;
 	bool draw_active;
