@@ -19,6 +19,7 @@ Ndx 是基于早期 Nvy 代码发展而来的个人项目。本文末尾记录�
 - `guifont` 支持逗号分隔的字体列表，可为缺失字形回退到其他字体
 - 可选的光标动画、光标特效、平滑滚动和光标渐隐闪烁
 - 可在 Neovim 中切换全屏和无边框窗口；使用 Ctrl+鼠标滚轮缩放
+- 支持透明背景，以及 Windows 11 的云母（Mica）和亚克力（Acrylic）背景
 - 拖放文件即可打开；按住 Ctrl 拖放可在新窗口打开
 - 支持设置窗口位置、网格大小、字体和 Neovim 可执行文件的命令行参数
 
@@ -108,6 +109,37 @@ end
 ```
 
 没有标题栏时，可用 Win+方向键，或 Alt+Space 后选择“移动”来移动窗口。
+
+## 透明、云母与亚克力背景
+
+将 `g:ndx_background_opacity` 设为 `0` 到 `1` 之间的值可让背景透明。它作用于 `Normal` 的背景色，以及使用相同颜色的高亮（例如许多配色方案里的浮动窗口）；其他背景色、文字和光标保持不透明。用 `g:ndx_backdrop` 选择透出的内容：
+
+| 值 | 背景 |
+| --- | --- |
+| `"none"`（默认） | 无，直接透出 Ndx 后面的窗口和桌面 |
+| `"mica"` | 云母，随桌面壁纸着色 |
+| `"mica_alt"` | Mica Alt，着色更深 |
+| `"acrylic"` | 亚克力，即毛玻璃，模糊 Ndx 后面的窗口 |
+
+```lua
+if vim.g.ndx then
+  vim.g.ndx_backdrop = "acrylic"
+  vim.g.ndx_background_opacity = 0.6
+end
+```
+
+两者都能在运行时随时切换。云母和亚克力需要 Windows 11 22H2 或更新版本，窗口失去焦点时 Windows 会把它们换成纯色。设置了背景材质但不透明度为 `1` 时，只有标题栏会显示它。背景透明时，文字改用灰度抗锯齿，因为 ClearType 需要不透明的背景。
+
+配色方案自带的透明背景选项也可以使用，例如 catppuccin 的 `transparent_background` 或 tokyonight 的 `transparent`。它们会清除 `Normal` 的背景色，通常也包括浮动窗口和侧边栏；这时 Neovim 会把背景按黑色（`background=light` 时为白色）告诉 GUI。Ndx 会像对待其他 `Normal` 背景一样，用 `g:ndx_background_opacity` 绘制这个颜色：不透明度为 `0` 时整个编辑器原样透出背景材质，调高则会叠一层暗色。使用 catppuccin 的云母配置示例：
+
+```lua
+-- options.lua
+vim.g.ndx_backdrop = "mica"
+vim.g.ndx_background_opacity = 0.0
+
+-- catppuccin 插件配置
+opts = { transparent_background = true }
+```
 
 ## 可选动画与文字光晕
 

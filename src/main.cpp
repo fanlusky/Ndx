@@ -30,7 +30,53 @@ struct Context {
 	uint32_t cursor_timer_id;
 	uint32_t cursor_timeout_in_ms;
 	HKL hkl;
+	// Set by g:ndx_backdrop, a DWM_SYSTEMBACKDROP_TYPE
+	DWORD backdrop;
 };
+
+// The values of DWM_SYSTEMBACKDROP_TYPE, the Windows 11 22H2 SDK isn't required
+constexpr DWORD BACKDROP_AUTO = 0;
+constexpr DWORD BACKDROP_MICA = 2;
+constexpr DWORD BACKDROP_ACRYLIC = 3;
+constexpr DWORD BACKDROP_MICA_ALT = 4;
+
+// Extending the frame 1px into the client area brings back the DWM shadow of the borderless
+// window. The backdrop is drawn behind the frame, so it covers the whole window then.
+void UpdateFrameMargins(HWND hwnd, Context *context) {
+	MARGINS margins {};
+	if (context->backdrop != BACKDROP_AUTO && context->renderer->borderless) {
+		margins = MARGINS { .cxLeftWidth = SHRT_MAX };
+	}
+	else if (context->backdrop != BACKDROP_AUTO) {
+		margins = MARGINS { -1, -1, -1, -1 };
+	}
+	else if (context->renderer->borderless) {
+		margins = MARGINS { 1, 1, 1, 1 };
+	}
+	DwmExtendFrameIntoClientArea(hwnd, &margins);
+}
+
+// The backdrop shows where the background is transparent, see g:ndx_background_opacity, and in
+// the title bar. It needs Windows 11 22H2, before that the attribute doesn't exist and is ignored.
+void SetBackdrop(HWND hwnd, Context *context, mpack_node_t value) {
+	DWORD backdrop = BACKDROP_AUTO;
+	if (mpack_node_type(value) == mpack_type_str) {
+		const char *str = mpack_node_str(value);
+		size_t length = mpack_node_strlen(value);
+		const auto Matches = [&](const char *name) {
+			return strlen(name) == length && !strncmp(name, str, length);
+		};
+		if (Matches("mica")) backdrop = BACKDROP_MICA;
+		else if (Matches("mica_alt")) backdrop = BACKDROP_MICA_ALT;
+		else if (Matches("acrylic")) backdrop = BACKDROP_ACRYLIC;
+	}
+	if (backdrop == context->backdrop) return;
+
+	context->backdrop = backdrop;
+	constexpr DWORD DWMWA_SYSTEMBACKDROP_TYPE = 38;
+	DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(DWORD));
+	UpdateFrameMargins(hwnd, context);
+}
 
 void ToggleFullscreen(HWND hwnd, Context *context) {
 	DWORD style = GetWindowLong(hwnd, GWL_STYLE);
@@ -80,10 +126,7 @@ void SetBorderless(HWND hwnd, Context *context, bool borderless) {
 	GetClientRect(hwnd, &client_rect);
 	MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT *>(&client_rect), 2);
 	renderer->borderless = borderless;
-
-	// Extending the frame 1px into the client area brings back the DWM shadow
-	MARGINS margins = borderless ? MARGINS { 1, 1, 1, 1 } : MARGINS {};
-	DwmExtendFrameIntoClientArea(hwnd, &margins);
+	UpdateFrameMargins(hwnd, context);
 
 	// Maximized and fullscreen windows keep filling their monitor
 	if (IsZoomed(hwnd) || !(GetWindowLong(hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW)) {
@@ -237,6 +280,9 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 				}
 				else if (name_length == strlen("ndx_fullscreen") && !strncmp(name_str, "ndx_fullscreen", name_length)) {
 					SetFullscreen(context->hwnd, context, NodeToBool(value, false));
+				}
+				else if (name_length == strlen("ndx_backdrop") && !strncmp(name_str, "ndx_backdrop", name_length)) {
+					SetBackdrop(context->hwnd, context, value);
 				}
 				else {
 					RendererSetOption(context->renderer, name_str, name_length, value);

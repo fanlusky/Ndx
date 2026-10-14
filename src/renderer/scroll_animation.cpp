@@ -81,10 +81,11 @@ bool CreateSnapshotBitmap(Renderer *renderer, ID2D1Bitmap1 **bitmap) {
 		SafeRelease(bitmap);
 	}
 
-	constexpr D2D1_BITMAP_PROPERTIES1 snapshot_properties {
+	// Like the grid bitmap, transparent where the window is
+	D2D1_BITMAP_PROPERTIES1 snapshot_properties {
 		.pixelFormat = D2D1_PIXEL_FORMAT {
 			.format = DXGI_FORMAT_B8G8R8A8_UNORM,
-			.alphaMode = D2D1_ALPHA_MODE_IGNORE
+			.alphaMode = renderer->transparent ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE
 		},
 		.dpiX = DEFAULT_DPI,
 		.dpiY = DEFAULT_DPI,

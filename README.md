@@ -17,6 +17,7 @@ https://github.com/user-attachments/assets/3d2d0769-f280-46a9-afdd-c4c6d9838f6c
 - Comma-separated `guifont` font lists, with fallback fonts for missing glyphs
 - Optional animated cursor, cursor effects, smooth scrolling, and smooth cursor blinking
 - Fullscreen and a borderless window, toggled from Neovim; Ctrl+mouse wheel to zoom
+- Transparent background with the Windows 11 Mica or Acrylic backdrop
 - Drag and drop files to open them; hold Ctrl while dropping to open them in a new window
 - Command-line options for window placement, geometry, fonts, and the Neovim executable
 
@@ -106,6 +107,37 @@ end
 ```
 
 Without a title bar, move the window with Win+arrow keys or Alt+Space, then Move.
+
+## Transparency, Mica and Acrylic
+
+Set `g:ndx_background_opacity` to a value between `0` and `1` to make the background transparent. It applies to the `Normal` background, and to highlights using the same color, such as floating windows of many colorschemes; other backgrounds, the text and the cursor stay opaque. Set `g:ndx_backdrop` to choose what shows through:
+
+| Value | Backdrop |
+| --- | --- |
+| `"none"` (default) | Nothing, the windows and the desktop behind Ndx |
+| `"mica"` | Mica, tinted by the desktop wallpaper |
+| `"mica_alt"` | Mica Alt, a stronger tint |
+| `"acrylic"` | Acrylic, a frosted glass blurring the windows behind Ndx |
+
+```lua
+if vim.g.ndx then
+  vim.g.ndx_backdrop = "acrylic"
+  vim.g.ndx_background_opacity = 0.6
+end
+```
+
+Both can be changed while Ndx is running. The backdrops need Windows 11 22H2 or later and are replaced by a plain color by Windows while the window isn't focused. With a backdrop but an opacity of `1`, only the title bar shows it. While the background is transparent, text is drawn with grayscale antialiasing instead of ClearType, which needs an opaque background.
+
+Colorschemes with a transparent background option, such as catppuccin's `transparent_background` or tokyonight's `transparent`, work too. They clear the background of `Normal` and usually of floats and sidebars, which Neovim then reports to GUIs as black, or white with `background=light`. Ndx draws that color with `g:ndx_background_opacity` like any other `Normal` background, so with an opacity of `0` the whole editor shows the backdrop unchanged, and higher values darken it. A Mica setup with catppuccin:
+
+```lua
+-- options.lua
+vim.g.ndx_backdrop = "mica"
+vim.g.ndx_background_opacity = 0.0
+
+-- the catppuccin plugin spec
+opts = { transparent_background = true }
+```
 
 ## Optional animations and text glow
 

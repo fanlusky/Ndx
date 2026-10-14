@@ -150,6 +150,15 @@ struct Renderer {
 	ID2D1Effect *d2d_neon_output;
 	bool window_focused;
 
+	// Set by g:ndx_background_opacity, the default background color, also where a highlight sets
+	// the same color, is drawn with it so the window backdrop shows through, see g:ndx_backdrop
+	float background_opacity;
+	// The swapchain has premultiplied alpha, text is then drawn with grayscale antialiasing, as
+	// ClearType needs an opaque background. Otherwise it is opaque, the alpha is ignored.
+	bool transparent;
+	// background_opacity crossed 1, the swapchain is created again with the next draw
+	bool swapchain_outdated;
+
 	// Animations advance by a refresh period of the window's monitor per frame, animation_time
 	// is how far they advanced since animation_start, both in seconds
 	double animation_start;
@@ -176,7 +185,14 @@ struct Renderer {
 	ID3D11Device2 *d3d_device;
 	ID3D11DeviceContext2 *d3d_context;
 	IDXGISwapChain2 *dxgi_swapchain;
+	UINT swapchain_flags;
 	HANDLE swapchain_wait_handle;
+	// The swapchain is shown by dcomp_visual, unless DirectComposition failed and the swapchain
+	// is the window's own, which can't be transparent
+	bool dxgi_swapchain_for_hwnd;
+	IDCompositionDevice *dcomp_device;
+	IDCompositionTarget *dcomp_target;
+	IDCompositionVisual *dcomp_visual;
 	ID2D1Factory5 *d2d_factory;
 	ID2D1Device4 *d2d_device;
 	ID2D1DeviceContext4 *d2d_context;
@@ -260,8 +276,8 @@ void RendererSetComposition(Renderer *renderer, const wchar_t *text, uint32_t le
 // Client rect of [start, end) of a composition string as it would be drawn at the cursor
 RECT RendererGetCompositionTextRect(Renderer *renderer, const wchar_t *text, uint32_t length, uint32_t start, uint32_t end);
 
-// Applies a g:ndx_neon_*, g:ndx_cursor_* or g:ndx_scroll_* variable, see CursorAnimationSetOption
-// and ScrollAnimationSetOption
+// Applies a g:ndx_neon_*, g:ndx_background_opacity, g:ndx_cursor_* or g:ndx_scroll_* variable, see
+// CursorAnimationSetOption and ScrollAnimationSetOption
 void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpack_node_t value);
 void RendererSetFocus(Renderer *renderer, bool focused);
 // Starts scrolling the windows nvim reports with an ndx_scroll notification, before it redraws

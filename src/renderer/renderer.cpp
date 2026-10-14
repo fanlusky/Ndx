@@ -75,6 +75,117 @@ void InitializeDWrite(Renderer *renderer) {
 	}
 }
 
+void ReleaseSwapchain(Renderer *renderer) {
+	SafeRelease(&renderer->d2d_target_bitmap);
+	SafeRelease(&renderer->dxgi_swapchain);
+	// The vsync thread may still be waiting on the handle of the swapchain, it's left alone then
+	if (renderer->swapchain_wait_handle && !renderer->frame_requested) {
+		CloseHandle(renderer->swapchain_wait_handle);
+	}
+	renderer->swapchain_wait_handle = nullptr;
+	renderer->swapchain_frame_acquired = false;
+}
+
+void ReleaseComposition(Renderer *renderer) {
+	SafeRelease(&renderer->dcomp_visual);
+	SafeRelease(&renderer->dcomp_target);
+	SafeRelease(&renderer->dcomp_device);
+}
+
+// The swapchain is shown by a DirectComposition visual. The window has no redirection bitmap, so
+// the visual is all there is of the client area, and where it's transparent the window backdrop
+// shows. Unlike a swapchain for the window itself, it can be replaced by a transparent one at any
+// time: DWM keeps showing the last frame of a window's swapchain once it's gone.
+bool CreateCompositionSwapchain(Renderer *renderer, IDXGIDevice3 *dxgi_device, IDXGIFactory2 *dxgi_factory,
+	DXGI_SWAP_CHAIN_DESC1 *swapchain_desc, IDXGISwapChain1 **swapchain) {
+	// Composition swapchains need a size of their own and the stretch scaling, which doesn't
+	// scale anything as the visual shows them at their size. They can't tear.
+	swapchain_desc->Width = max(swapchain_desc->Width, 1u);
+	swapchain_desc->Height = max(swapchain_desc->Height, 1u);
+	swapchain_desc->Scaling = DXGI_SCALING_STRETCH;
+	swapchain_desc->AlphaMode = renderer->transparent ? DXGI_ALPHA_MODE_PREMULTIPLIED : DXGI_ALPHA_MODE_IGNORE;
+	swapchain_desc->Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+	if (FAILED(dxgi_factory->CreateSwapChainForComposition(renderer->d3d_device, swapchain_desc, nullptr, swapchain))) {
+		return false;
+	}
+	if (!renderer->dcomp_visual &&
+		(FAILED(DCompositionCreateDevice(dxgi_device, IID_PPV_ARGS(&renderer->dcomp_device))) ||
+		FAILED(renderer->dcomp_device->CreateTargetForHwnd(renderer->hwnd, true, &renderer->dcomp_target)) ||
+		FAILED(renderer->dcomp_device->CreateVisual(&renderer->dcomp_visual)) ||
+		FAILED(renderer->dcomp_target->SetRoot(renderer->dcomp_visual)))) {
+		SafeRelease(swapchain);
+		ReleaseComposition(renderer);
+		return false;
+	}
+	if (FAILED(renderer->dcomp_visual->SetContent(*swapchain)) || FAILED(renderer->dcomp_device->Commit())) {
+		SafeRelease(swapchain);
+		ReleaseComposition(renderer);
+		return false;
+	}
+	return true;
+}
+
+void CreateSwapchain(Renderer *renderer, uint32_t width, uint32_t height) {
+	DXGI_SWAP_CHAIN_DESC1 swapchain_desc {
+		.Width = width,
+		.Height = height,
+		.Format = DXGI_FORMAT_B8G8R8A8_UNORM,
+		.SampleDesc = {
+			.Count = 1,
+			.Quality = 0
+		},
+		.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+		.BufferCount = 2,
+		.Scaling = DXGI_SCALING_NONE,
+		.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+		.AlphaMode = DXGI_ALPHA_MODE_IGNORE,
+		.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+	};
+
+	IDXGIDevice3 *dxgi_device;
+	WIN_CHECK(renderer->d3d_device->QueryInterface(__uuidof(IDXGIDevice3), reinterpret_cast<void **>(&dxgi_device)));
+	IDXGIAdapter *dxgi_adapter;
+	WIN_CHECK(dxgi_device->GetAdapter(&dxgi_adapter));
+	IDXGIFactory2 *dxgi_factory;
+	WIN_CHECK(dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory)));
+
+	IDXGISwapChain1 *dxgi_swapchain_temp = nullptr;
+	// Without DirectComposition, the swapchain of the window is opaque. It is only replaced
+	// by a composition swapchain if DirectComposition failed before as well.
+	bool composed = !renderer->dxgi_swapchain_for_hwnd &&
+		CreateCompositionSwapchain(renderer, dxgi_device, dxgi_factory, &swapchain_desc, &dxgi_swapchain_temp);
+	if (!composed) {
+		renderer->transparent = false;
+		renderer->dxgi_swapchain_for_hwnd = true;
+		swapchain_desc.Width = width;
+		swapchain_desc.Height = height;
+		swapchain_desc.Scaling = DXGI_SCALING_NONE;
+		swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+		swapchain_desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+		WIN_CHECK(dxgi_factory->CreateSwapChainForHwnd(renderer->d3d_device,
+			renderer->hwnd, &swapchain_desc, nullptr, nullptr, &dxgi_swapchain_temp));
+		WIN_CHECK(dxgi_factory->MakeWindowAssociation(renderer->hwnd, DXGI_MWA_NO_ALT_ENTER));
+	}
+	renderer->swapchain_flags = swapchain_desc.Flags;
+	WIN_CHECK(dxgi_swapchain_temp->QueryInterface(__uuidof(IDXGISwapChain2),
+				reinterpret_cast<void **>(&renderer->dxgi_swapchain)));
+
+	WIN_CHECK(renderer->dxgi_swapchain->SetMaximumFrameLatency(1));
+	renderer->swapchain_wait_handle = renderer->dxgi_swapchain->GetFrameLatencyWaitableObject();
+	renderer->swapchain_frame_acquired = false;
+
+	SafeRelease(&dxgi_swapchain_temp);
+	SafeRelease(&dxgi_device);
+	SafeRelease(&dxgi_adapter);
+	SafeRelease(&dxgi_factory);
+}
+
+// The bitmaps the grid is drawn into before it reaches the swapchain
+D2D1_ALPHA_MODE GridAlphaMode(Renderer *renderer) {
+	return renderer->transparent ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE;
+}
+
 void HandleDeviceLost(Renderer *renderer);
 void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint32_t height) {
 	// Initializing window resources invalidates previous draws to the window,
@@ -97,12 +208,13 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 	if (renderer->dxgi_swapchain) {
 		renderer->d2d_target_bitmap->Release();
 
+		// A composition swapchain can't be resized to nothing, e.g. while minimized
 		HRESULT hr = renderer->dxgi_swapchain->ResizeBuffers(
 			2,
-			width,
-			height,
+			renderer->dxgi_swapchain_for_hwnd ? width : max(width, 1u),
+			renderer->dxgi_swapchain_for_hwnd ? height : max(height, 1u),
 			DXGI_FORMAT_B8G8R8A8_UNORM,
-			DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+			renderer->swapchain_flags
 		);
 
 		if (hr == DXGI_ERROR_DEVICE_REMOVED) {
@@ -110,50 +222,17 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 		}
 	}
 	else {
-		DXGI_SWAP_CHAIN_DESC1 swapchain_desc {
-			.Width = width,
-			.Height = height,
-			.Format = DXGI_FORMAT_B8G8R8A8_UNORM,
-			.SampleDesc = {
-				.Count = 1,
-				.Quality = 0
-			},
-			.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
-			.BufferCount = 2,
-			.Scaling = DXGI_SCALING_NONE,
-			.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-			.AlphaMode = DXGI_ALPHA_MODE_IGNORE,
-			.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
-		};
-
-		IDXGIDevice3 *dxgi_device;
-		WIN_CHECK(renderer->d3d_device->QueryInterface(__uuidof(IDXGIDevice3), reinterpret_cast<void **>(&dxgi_device)));
-		IDXGIAdapter *dxgi_adapter;
-		WIN_CHECK(dxgi_device->GetAdapter(&dxgi_adapter));
-		IDXGIFactory2 *dxgi_factory;
-		WIN_CHECK(dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory)));
-
-		IDXGISwapChain1 *dxgi_swapchain_temp;
-		WIN_CHECK(dxgi_factory->CreateSwapChainForHwnd(renderer->d3d_device,
-			renderer->hwnd, &swapchain_desc, nullptr, nullptr, &dxgi_swapchain_temp));
-		WIN_CHECK(dxgi_factory->MakeWindowAssociation(renderer->hwnd, DXGI_MWA_NO_ALT_ENTER));
-		WIN_CHECK(dxgi_swapchain_temp->QueryInterface(__uuidof(IDXGISwapChain2), 
-					reinterpret_cast<void **>(&renderer->dxgi_swapchain)));
-
-		WIN_CHECK(renderer->dxgi_swapchain->SetMaximumFrameLatency(1));
-		renderer->swapchain_wait_handle = renderer->dxgi_swapchain->GetFrameLatencyWaitableObject();
-		renderer->swapchain_frame_acquired = false;
-
-		SafeRelease(&dxgi_swapchain_temp);
-		SafeRelease(&dxgi_device);
-		SafeRelease(&dxgi_adapter);
-		SafeRelease(&dxgi_factory);
+		CreateSwapchain(renderer, width, height);
 	}
 
-	constexpr D2D1_BITMAP_PROPERTIES1 target_bitmap_properties {
+	// ClearType is only drawn onto an opaque target
+	renderer->d2d_context->SetTextAntialiasMode(renderer->transparent ?
+		D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE : D2D1_TEXT_ANTIALIAS_MODE_DEFAULT);
+
+	D2D1_BITMAP_PROPERTIES1 target_bitmap_properties {
 		.pixelFormat = D2D1_PIXEL_FORMAT {
 			.format = DXGI_FORMAT_B8G8R8A8_UNORM,
-			.alphaMode = D2D1_ALPHA_MODE_IGNORE
+			.alphaMode = GridAlphaMode(renderer)
 		},
 		.dpiX = DEFAULT_DPI,
 		.dpiY = DEFAULT_DPI,
@@ -173,13 +252,13 @@ void InitializeWindowDependentResources(Renderer *renderer, uint32_t width, uint
 
 void HandleDeviceLost(Renderer *renderer) {
 	ResetLineLayouts(renderer);
+	ReleaseSwapchain(renderer);
+	ReleaseComposition(renderer);
 	SafeRelease(&renderer->d3d_device);
 	SafeRelease(&renderer->d3d_context);
-	SafeRelease(&renderer->dxgi_swapchain);
 	SafeRelease(&renderer->d2d_factory);
 	SafeRelease(&renderer->d2d_device);
 	SafeRelease(&renderer->d2d_context);
-	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
 	ReleaseNeonResources(renderer);
 	ScrollAnimationReleaseResources(renderer->scroll_animation);
@@ -239,6 +318,7 @@ void RendererInitialize(Renderer *renderer, HWND hwnd, bool disable_ligatures, f
 	renderer->hwnd = hwnd;
 	renderer->neon_radius = DEFAULT_NEON_RADIUS;
 	renderer->neon_intensity = DEFAULT_NEON_INTENSITY;
+	renderer->background_opacity = 1.0f;
 	renderer->disable_ligatures = disable_ligatures;
 	renderer->linespace_factor = linespace_factor;
 
@@ -285,13 +365,13 @@ void RendererShutdown(Renderer *renderer) {
 		CloseHandle(renderer->vsync_request_event);
 	}
 
+	ReleaseSwapchain(renderer);
+	ReleaseComposition(renderer);
 	SafeRelease(&renderer->d3d_device);
 	SafeRelease(&renderer->d3d_context);
-	SafeRelease(&renderer->dxgi_swapchain);
 	SafeRelease(&renderer->d2d_factory);
 	SafeRelease(&renderer->d2d_device);
 	SafeRelease(&renderer->d2d_context);
-	SafeRelease(&renderer->d2d_target_bitmap);
 	SafeRelease(&renderer->d2d_grid_bitmap);
 	ReleaseNeonResources(renderer);
 	SafeRelease(&renderer->d2d_background_rect_brush);
@@ -679,9 +759,20 @@ void ApplyHighlightAttributes(Renderer *renderer, HighlightAttributes *hl_attrib
 
 void DrawBackgroundRect(Renderer *renderer, D2D1_RECT_F rect, HighlightAttributes *hl_attribs) {
 	uint32_t color = CreateBackgroundColor(renderer, hl_attribs);
-	renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(color));
+	if (!renderer->transparent) {
+		renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(color));
+		renderer->d2d_context->FillRectangle(rect, renderer->d2d_background_rect_brush);
+		return;
+	}
 
+	// Colorschemes and plugins often set the Normal background explicitly, e.g. for floats,
+	// it is just as transparent then. The background replaces what was drawn there before,
+	// blending would add up the alpha of every redraw.
+	float alpha = color == renderer->hl_attribs[0].background ? renderer->background_opacity : 1.0f;
+	renderer->d2d_background_rect_brush->SetColor(D2D1::ColorF(color, alpha));
+	renderer->d2d_context->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
 	renderer->d2d_context->FillRectangle(rect, renderer->d2d_background_rect_brush);
+	renderer->d2d_context->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
 }
 
 D2D1_RECT_F GetCursorForegroundRect(Renderer *renderer, D2D1_RECT_F cursor_bg_rect) {
@@ -943,8 +1034,8 @@ void CreateNeonResources(Renderer *renderer) {
 		.height = max(renderer->pixel_size.height, 1u)
 	};
 	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_bitmap));
-	// Opaque like the grid bitmap, text is only drawn with ClearType onto an opaque target
-	properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_IGNORE;
+	// Like the grid bitmap, text is only drawn with ClearType onto an opaque target
+	properties.pixelFormat.alphaMode = GridAlphaMode(renderer);
 	WIN_CHECK(renderer->d2d_context->CreateBitmap(size, nullptr, 0, &properties, &renderer->d2d_neon_base_bitmap));
 
 	// Light adds up linearly, blurring and adding the sRGB values instead makes the glow
@@ -965,7 +1056,7 @@ void CreateNeonResources(Renderer *renderer) {
 	halo->SetInputEffect(1, text);
 	WIN_CHECK(halo->SetValue(D2D1_COMPOSITE_PROP_MODE, D2D1_COMPOSITE_MODE_DESTINATION_OUT));
 
-	// Clamping also keeps the alpha of the opaque grid at 1
+	// Clamping also keeps the alpha of an opaque grid at 1, over a transparent one the glow adds alpha
 	renderer->d2d_neon_sum = CreateNeonEffect(renderer, CLSID_D2D1ArithmeticComposite);
 	renderer->d2d_neon_sum->SetInputEffect(0, base);
 	renderer->d2d_neon_sum->SetInputEffect(1, halo);
@@ -2006,10 +2097,10 @@ void UpdateAnimationActive(Renderer *renderer) {
 }
 
 void CreateGridBitmap(Renderer *renderer) {
-	constexpr D2D1_BITMAP_PROPERTIES1 grid_bitmap_properties {
+	D2D1_BITMAP_PROPERTIES1 grid_bitmap_properties {
 		.pixelFormat = D2D1_PIXEL_FORMAT {
 			.format = DXGI_FORMAT_B8G8R8A8_UNORM,
-			.alphaMode = D2D1_ALPHA_MODE_IGNORE
+			.alphaMode = GridAlphaMode(renderer)
 		},
 		.dpiX = DEFAULT_DPI,
 		.dpiY = DEFAULT_DPI,
@@ -2035,8 +2126,28 @@ void AcquireSwapchainFrame(Renderer *renderer) {
 	}
 }
 
+// Switches between the opaque and the transparent swapchain, everything drawn so far is drawn again
+void UpdateTransparency(Renderer *renderer) {
+	if (!renderer->swapchain_outdated || !renderer->dxgi_swapchain) return;
+	renderer->swapchain_outdated = false;
+
+	bool transparent = renderer->background_opacity < 1.0f;
+	if (transparent == renderer->transparent || renderer->dxgi_swapchain_for_hwnd) return;
+	renderer->transparent = transparent;
+
+	ID3D11RenderTargetView *null_views[] = { nullptr };
+	renderer->d3d_context->OMSetRenderTargets(ARRAYSIZE(null_views), null_views, nullptr);
+	renderer->d2d_context->SetTarget(nullptr);
+	ReleaseSwapchain(renderer);
+	renderer->d3d_context->Flush();
+	// The bitmaps between the grid and the swapchain change their alpha mode as well
+	ScrollAnimationReleaseResources(renderer->scroll_animation);
+	InitializeWindowDependentResources(renderer, renderer->pixel_size.width, renderer->pixel_size.height);
+}
+
 void StartDraw(Renderer *renderer) {
 	if (!renderer->draw_active) {
+		UpdateTransparency(renderer);
 		UpdateAnimationActive(renderer);
 		// With the animations, frames are drawn once the vsync thread found the swapchain
 		// ready, nvim's changes are drawn into the grid bitmap meanwhile
@@ -2223,7 +2334,8 @@ void FinishDraw(Renderer *renderer) {
 		renderer->window_occluded = hr == DXGI_STATUS_OCCLUDED;
 	}
 	else {
-		hr = renderer->dxgi_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+		hr = renderer->dxgi_swapchain->Present(0,
+			(renderer->swapchain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) ? DXGI_PRESENT_ALLOW_TEARING : 0);
 	}
 	renderer->draw_active = false;
 	renderer->swapchain_frame_acquired = false;
@@ -2407,6 +2519,18 @@ void RendererSetOption(Renderer *renderer, const char *name, size_t length, mpac
 			renderer->neon_intensity = intensity;
 			renderer->draws_invalidated = true;
 			UpdateNeonEffects(renderer);
+		}
+		known = true;
+	}
+	else if (length == strlen("ndx_background_opacity") && !strncmp(name, "ndx_background_opacity", length)) {
+		float opacity = NodeToFloat(value, 1.0f);
+		opacity = std::isfinite(opacity) ? max(0.0f, min(opacity, 1.0f)) : 1.0f;
+		if (opacity != renderer->background_opacity) {
+			if ((opacity < 1.0f) != (renderer->background_opacity < 1.0f)) {
+				renderer->swapchain_outdated = true;
+			}
+			renderer->background_opacity = opacity;
+			renderer->draws_invalidated = true;
 		}
 		known = true;
 	}

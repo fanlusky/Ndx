@@ -51,6 +51,7 @@ target_link_libraries(Ndx PUBLIC
     dwrite.lib
     Shcore.lib
     Dwmapi.lib
+    dcomp.lib
     ole32.lib
     oleaut32.lib
     uuid.lib
@@ -70,6 +71,7 @@ target_precompile_headers(Ndx PUBLIC
     <dwrite_3.h>
     <shellscalingapi.h>
     <dwmapi.h>
+    <dcomp.h>
     <msctf.h>
     
     "src/third_party/mpack/mpack.h"
