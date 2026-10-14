@@ -25,11 +25,11 @@ BEGIN
     // 0x0409 == U.S. English; 0x04E4 => Windows Multilingual
     BLOCK "040904E4"
     BEGIN
-      VALUE "CompanyName",      "Rasmus Ishøy Michelsen and collaborators\0"
+      VALUE "CompanyName",      L"Rasmus Ish\x00F8y Michelsen and collaborators\0"
       VALUE "FileDescription",  "Ndx.exe\0"
       VALUE "FileVersion",      VER_FILE_VERSION_STR
       VALUE "InternalName",     "Ndx\0"
-      VALUE "LegalCopyright",   "MIT License © 2020 Rasmus Ishøy Michelsen\0"
+      VALUE "LegalCopyright",   L"MIT License \x00A9 2020 Rasmus Ish\x00F8y Michelsen\0"
       VALUE "LegalTrademarks",  "https://github.com/fanlusky/Ndx/\0"
       VALUE "OriginalFilename", "Ndx.exe\0"
       VALUE "ProductName",      "Ndx - A Neovim client in C++ (fork of Nvy)\0"
