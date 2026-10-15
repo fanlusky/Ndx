@@ -52,6 +52,20 @@ Write-Host "Configuring ($Config)" -ForegroundColor Cyan
 cmake -S $root -B $buildDir -G Ninja "-DCMAKE_BUILD_TYPE=$Config"
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed." }
 
+# CMake can regenerate cmake_pch.hxx without bumping its timestamp past the compiled .pch, so
+# Ninja would keep using a stale PCH; track the header's content and drop the PCH when it changes
+$pchDir = Join-Path $buildDir 'CMakeFiles\Ndx.dir'
+$pchHeader = Join-Path $pchDir 'cmake_pch.hxx'
+$pchHashFile = Join-Path $buildDir 'cmake_pch.hxx.sha256'
+if (Test-Path $pchHeader) {
+    $pchHash = (Get-FileHash $pchHeader -Algorithm SHA256).Hash
+    $oldPchHash = if (Test-Path $pchHashFile) { (Get-Content $pchHashFile -Raw).Trim() } else { '' }
+    if ($pchHash -ne $oldPchHash) {
+        Remove-Item (Join-Path $pchDir 'cmake_pch.cxx.pch'), (Join-Path $pchDir 'cmake_pch.cxx.obj') -Force -ErrorAction SilentlyContinue
+        Set-Content $pchHashFile $pchHash -NoNewline
+    }
+}
+
 Write-Host "Building ($Config)" -ForegroundColor Cyan
 cmake --build $buildDir
 if ($LASTEXITCODE -ne 0) { throw "Build failed." }
