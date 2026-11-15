@@ -132,6 +132,8 @@ struct Renderer {
 	bool cursor_animating;
 	bool scroll_animating;
 	bool cursor_animation_was_in_cmdline;
+	bool cursor_pending;
+	bool cursor_pending_release;
 	LARGE_INTEGER performance_frequency;
 	ID2D1Bitmap1 *d2d_grid_bitmap;
 	// Set by g:ndx_borderless, the window then has no title bar and the client area is the

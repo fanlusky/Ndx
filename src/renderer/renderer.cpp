@@ -1459,7 +1459,10 @@ bool UpdateGridSize(Renderer *renderer, mpack_node_t grid_resize) {
 }
 
 void UpdateCursorPos(Renderer *renderer, mpack_node_t cursor_goto) {
-	mpack_node_t cursor_goto_params = mpack_node_array_at(cursor_goto, 1);
+	// Repeated UI events share one array. Only the final destination is visible at flush.
+	size_t count = mpack_node_array_length(cursor_goto);
+	if (count < 2) return;
+	mpack_node_t cursor_goto_params = mpack_node_array_at(cursor_goto, count - 1);
 	renderer->cursor.row = MPackIntFromArray(cursor_goto_params, 1);
 	renderer->cursor.col = MPackIntFromArray(cursor_goto_params, 2);
 }
@@ -2250,6 +2253,13 @@ void ComposeFrame(Renderer *renderer) {
 	renderer->scroll_animating = ScrollAnimationUpdate(renderer->scroll_animation, dt, renderer->font_height);
 	ScrollAnimationDraw(renderer);
 
+	// An empty scratch window may be waiting for asynchronous plugin content. Keep the
+	// animation at its previous position until the real cursor destination is available.
+	if (renderer->cursor_pending) {
+		renderer->cursor_animating = false;
+		return;
+	}
+
 	CursorCell cell;
 	if (!GetCursorCell(renderer, &cell)) {
 		renderer->cursor_animating = false;
@@ -2622,6 +2632,10 @@ void RendererRedraw(Renderer *renderer, mpack_node_t params, bool start_maximize
 			ScrollRegion(renderer, redraw_command_arr);
 		}
 		else if (MPackMatchString(redraw_command_name, "flush")) {
+			if (renderer->cursor_pending_release) {
+				renderer->cursor_pending = false;
+				renderer->cursor_pending_release = false;
+			}
 			if (!renderer->has_drawn) {
 				renderer->has_drawn = true;
 				ShowWindow(renderer->hwnd, start_maximized ? SW_MAXIMIZE : SW_SHOWDEFAULT);			}

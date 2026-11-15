@@ -191,6 +191,41 @@ void NvimInitialize(Nvim *nvim, wchar_t *command_line, HWND hwnd) {
 	mpack_start_array(&writer, 1);
 	mpack_write_cstr(&writer, R"(lua
 local api = vim.api
+-- Some explorers open an empty scratch window before their asynchronous scan finishes.
+-- Observe redraws because plugins may create those windows with noautocmd.
+local cursor_win, cursor_buf, cursor_pending
+local cursor_generation = 0
+local function set_cursor_pending(pending)
+  if pending == cursor_pending then return end
+  cursor_pending = pending
+  vim.rpcnotify(1, 'ndx_cursor_pending', pending)
+end
+api.nvim_set_decoration_provider(api.nvim_create_namespace('ndx_cursor_transition'), {
+  on_start = function()
+    local win, buf = api.nvim_get_current_win(), api.nvim_get_current_buf()
+    local changed = win ~= cursor_win or buf ~= cursor_buf
+    cursor_win, cursor_buf = win, buf
+    local empty = vim.bo[buf].buftype == 'nofile' and api.nvim_buf_line_count(buf) == 1
+      and api.nvim_buf_get_lines(buf, 0, 1, false)[1] == ''
+    if changed then
+      cursor_generation = cursor_generation + 1
+      set_cursor_pending(empty)
+      if empty then
+        local generation = cursor_generation
+        -- Legitimately empty scratch buffers must still get a cursor.
+        vim.defer_fn(function()
+          if generation == cursor_generation and cursor_pending then
+            set_cursor_pending(false)
+            vim.cmd('redraw')
+          end
+        end, 500)
+      end
+    elseif cursor_pending and not empty then
+      set_cursor_pending(false)
+    end
+    return false
+  end,
+})
 api.nvim_create_autocmd('WinScrolled', { group = api.nvim_create_augroup('ndx_scroll', {}), callback = function()
   local enabled = vim.g.ndx_scroll_animation
   if not enabled or enabled == 0 then return end

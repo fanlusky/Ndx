@@ -264,6 +264,12 @@ void ProcessMPackMessage(Context *context, mpack_tree_t *tree) {
 				TsfNotifyLayoutChange(context->tsf);
 			}
 		}
+		else if (MPackMatchString(result.notification.name, "ndx_cursor_pending")) {
+			bool pending = mpack_node_bool(mpack_node_array_at(result.params, 0));
+			if (pending) context->renderer->cursor_pending = true;
+			// Resume only at the next flush, after its cursor position has arrived.
+			context->renderer->cursor_pending_release = !pending;
+		}
 		else if (MPackMatchString(result.notification.name, "ndx_scroll")) {
 			// Sent by the WinScrolled autocmd, see NvimInitialize
 			RendererScrollWindows(context->renderer, mpack_node_array_at(result.params, 0));
