@@ -1,5 +1,7 @@
 # Ndx
 
+<img src="resources/icons/ndx-logo.svg" alt="Ndx logo" width="96">
+
 [简体中文](README.zh-CN.md)
 
 Ndx is a native Windows graphical client for [Neovim](https://neovim.io/), written in C++20. It renders Neovim's UI with DirectWrite and Direct2D and adds Windows-focused features such as TSF input method support, font fallback lists, and optional cursor and scrolling animations.

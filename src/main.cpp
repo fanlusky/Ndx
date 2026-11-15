@@ -808,10 +808,10 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 		.style = CS_HREDRAW | CS_VREDRAW,
 		.lpfnWndProc = WndProc,
 		.hInstance = instance,
-		.hIcon = static_cast<HICON>(LoadImage(GetModuleHandle(NULL), L"NVIM_ICON", IMAGE_ICON, LR_DEFAULTSIZE, LR_DEFAULTSIZE, 0)),
+		.hIcon = static_cast<HICON>(LoadImage(GetModuleHandle(NULL), L"NDX_ICON", IMAGE_ICON, LR_DEFAULTSIZE, LR_DEFAULTSIZE, 0)),
 		.hCursor = LoadCursor(NULL, IDC_ARROW),
 		.lpszClassName = window_class_name,
-		.hIconSm = static_cast<HICON>(LoadImage(GetModuleHandle(NULL), L"NVIM_ICON", IMAGE_ICON, LR_DEFAULTSIZE, LR_DEFAULTSIZE, 0))
+		.hIconSm = static_cast<HICON>(LoadImage(GetModuleHandle(NULL), L"NDX_ICON", IMAGE_ICON, LR_DEFAULTSIZE, LR_DEFAULTSIZE, 0))
 	};
 
 	if (!RegisterClassEx(&window_class)) {

@@ -1,5 +1,7 @@
 # Ndx
 
+<img src="resources/icons/ndx-logo.svg" alt="Ndx logo" width="96">
+
 [English](README.md)
 
 Ndx 是一款用 C++20 编写的 Windows 原生 Neovim 图形客户端。它使用 DirectWrite 和 Direct2D 绘制 Neovim 界面，并提供面向 Windows 的功能，例如 TSF 输入法支持、多字体回退，以及可选的光标和滚动动画。

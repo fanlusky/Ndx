@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 project(Ndx)
-add_executable(Ndx WIN32 "resources/third_party/nvim_icon.rc" version_info.rc)
+add_executable(Ndx WIN32 "resources/icons/ndx_icon.rc" version_info.rc)
 
 set(Ndx_HEADERS
     "src/common/dx_helper.h"
